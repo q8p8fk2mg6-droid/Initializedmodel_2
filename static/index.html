@@ -1,0 +1,296 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Binance Perp Carry Optimizer</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260223a" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Binance 永续合约资金费率组合优化</h1>
+    <div class="hint">使用高交易量合约池 + 机器学习参数寻优</div>
+
+    <section class="card">
+      <h2>1) 回测参数</h2>
+      <div class="grid">
+        <label>开始日期<input id="start_date" type="date" /></label>
+        <label>结束日期<input id="end_date" type="date" /></label>
+        <label>初始资金(USDT)<input id="initial_capital" type="number" value="1000" /></label>
+        <label>TopK<input id="top_k" type="number" value="50" min="1" /></label>
+        <label>max evals<input id="max_evals" type="number" value="10000" min="10" /></label>
+        <label>并行进程数<input id="parallel_workers" type="number" value="32" min="0" max="128" /></label>
+        <label>运行模式
+          <select id="execution_mode">
+            <option value="performance" selected>性能优先 (高CPU/高内存)</option>
+            <option value="memory">内存优先 (低内存占用)</option>
+          </select>
+        </label>
+      </div>
+
+      <h3>资产组合搜索</h3>
+      <div class="grid">
+        <label>Top 合约数量<input id="universe_limit" type="number" value="100" min="10" max="200" /></label>
+        <label>最少币种数量<input id="portfolio_min" type="number" value="3" min="1" max="10" /></label>
+        <label>最多币种数量<input id="portfolio_max" type="number" value="4" min="1" max="10" /></label>
+        <label>权重步长(%)<input id="weight_step" type="number" value="5" min="1" max="50" /></label>
+        <label>候选池大小
+          <span class="hint">0=自动</span>
+          <input id="candidate_pool" type="number" value="0" min="0" />
+        </label>
+        <label>
+          方向要求
+          <select id="require_both">
+            <option value="true" selected>至少含多/空</option>
+            <option value="false">允许全多或全空</option>
+          </select>
+        </label>
+      </div>
+
+      <h3>机器学习参数范围</h3>
+      <div class="grid">
+        <label>rehedge 最小(小时)<input id="rehedge_min" type="number" value="1" min="0" /></label>
+        <label>rehedge 最大(小时)<input id="rehedge_max" type="number" value="720" min="0" /></label>
+        <label>rehedge 步长(小时)<input id="rehedge_step" type="number" value="1" min="1" /></label>
+        <label>阈值 最小(%)<input id="threshold_min" type="number" value="0" min="0" max="100" /></label>
+        <label>阈值 最大(%)<input id="threshold_max" type="number" value="5" min="0" max="100" /></label>
+        <label>阈值 步长(%)<input id="threshold_step" type="number" value="1" min="0.1" max="100" /></label>
+        <label>多头杠杆 最小<input id="long_leverage_min" type="number" value="1" min="1" max="20" /></label>
+        <label>多头杠杆 最大<input id="long_leverage_max" type="number" value="3" min="1" max="20" /></label>
+        <label>多头杠杆 步长<input id="long_leverage_step" type="number" value="0.5" min="0.1" max="20" /></label>
+        <label>空头杠杆 最小<input id="short_leverage_min" type="number" value="1" min="1" max="20" /></label>
+        <label>空头杠杆 最大<input id="short_leverage_max" type="number" value="3" min="1" max="20" /></label>
+        <label>空头杠杆 步长<input id="short_leverage_step" type="number" value="0.5" min="0.1" max="20" /></label>
+      </div>
+
+      <div class="grid">
+        <label>Binance API Key（可选）<input id="binance_api_key" type="password" autocomplete="off" /></label>
+        <label>Binance API Secret（可选）<input id="binance_api_secret" type="password" autocomplete="off" /></label>
+      </div>
+
+      <div class="button-row">
+        <button id="run_backtest">开始回测 + 机器学习寻优</button>
+        <button id="run_custom_backtest" class="secondary">开始自定义组合回测</button>
+      </div>
+
+      <h3>参数时效性（T0前选L）</h3>
+      <div class="grid">
+        <label>参数生效日 T0<input id="decision_date" type="date" /></label>
+        <label>前瞻周期 H(天)<input id="forward_days" type="number" value="30" min="7" max="120" /></label>
+        <label>锚点数量 N<input id="anchor_count" type="number" value="6" min="1" max="24" /></label>
+        <label>查看锚点(1=最近)<input id="lookback_anchor_index" type="number" value="1" min="1" max="24" /></label>
+        <label>候选窗口 L(天,逗号分隔)<input id="lookback_windows" type="text" value="30,60,90,180,360" /></label>
+      </div>
+      <div class="button-row">
+        <button id="run_timeliness" class="secondary">开始参数时效性分析</button>
+      </div>
+      <div id="timeliness_status" class="status"></div>
+      <div class="table-wrap">
+        <table id="timeliness_table">
+          <thead>
+            <tr>
+              <th>L(天)</th>
+              <th>Score</th>
+              <th>完成锚点</th>
+              <th>平均年化</th>
+              <th>平均总收益</th>
+              <th>平均夏普</th>
+              <th>平均回撤</th>
+              <th>胜率</th>
+              <th>备注</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-track"><div id="backtest_progress_fill" class="progress-fill"></div></div>
+        <div id="backtest_progress_text" class="progress-text">0%</div>
+      </div>
+
+      <div id="status" class="status"></div>
+      <div id="runtime_status" class="status">Runtime: idle</div>
+
+      <h3>自定义组合（回填）</h3>
+      <div id="custom_prefill_meta" class="status">请先在收益率排名中点击“回填自定义”。</div>
+      <div class="grid">
+        <label>开始日期<input id="custom_start_date" type="date" /></label>
+        <label>结束日期<input id="custom_end_date" type="date" /></label>
+        <label>初始仓位(USDT)<input id="custom_initial_capital" type="number" value="1000" min="1" /></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2) 收益率排名</h2>
+      <div class="grid">
+        <label>排序模式
+          <select id="ranking_mode">
+            <option value="return_desc">收益率优先</option>
+            <option value="mdd_asc_return_desc">MDD升序优先</option>
+            <option value="sharpe_desc_return_desc" selected>夏普降序优先</option>
+          </select>
+        </label>
+        <label>最低 APY(%)<input id="min_apy_pct" type="number" value="0" /></label>
+        <label>最低夏普<input id="min_sharpe" type="number" value="1.5" step="0.1" /></label>
+        <label>最高 MDD(%)<input id="max_mdd_pct" type="number" value="30" step="0.1" /></label>
+        <label>TopK<input id="rank_top_k" type="number" value="50" min="1" /></label>
+      </div>
+      <div class="button-row">
+        <button id="apply_rank">应用筛选排序</button>
+      </div>
+      <div class="inline-actions">
+        <label class="toggle-inline">
+          <input id="reverse_fill_enabled" type="checkbox" />
+          反向回填（多空互换，作用于“回填自定义”和“仓位计算”）
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table id="result_table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>年化收益</th>
+              <th>总收益</th>
+              <th>夏普</th>
+              <th>最大回撤</th>
+              <th>Rehedge(h)</th>
+              <th>阈值(%)</th>
+              <th>多头杠杆</th>
+              <th>空头杠杆</th>
+              <th>组合</th>
+              <th>资金费收益</th>
+              <th>手续费</th>
+              <th>曲线</th>
+              <th>回填自定义</th>
+              <th>仓位</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3) 资金曲线</h2>
+      <div class="progress-wrap">
+        <div class="progress-track"><div id="curve_progress_fill" class="progress-fill"></div></div>
+        <div id="curve_progress_text" class="progress-text">0%</div>
+      </div>
+      <div id="curve_hint" class="status">请在收益率排名中点击“加载”查看曲线。</div>
+      <div class="chart-wrap">
+        <canvas id="equity_chart"></canvas>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4) 仓位计算器</h2>
+      <div class="grid">
+        <label>投入资金(USDT)<input id="calc_capital" type="number" value="100000" /></label>
+        <label>多头杠杆<input id="calc_long_leverage" type="number" value="1" min="1" max="20" /></label>
+        <label>空头杠杆<input id="calc_short_leverage" type="number" value="1" min="1" max="20" /></label>
+      </div>
+      <div class="button-row">
+        <button id="calc_positions_btn">按选中策略计算仓位</button>
+      </div>
+      <div id="calc_status" class="status"></div>
+      <div class="table-wrap">
+        <table id="calc_position_table">
+          <thead>
+            <tr>
+              <th>币种</th>
+              <th>方向</th>
+              <th>权重</th>
+              <th>保证金</th>
+              <th>名义</th>
+              <th>杠杆</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>5) History Top Runs</h2>
+      <div class="hint">Click "Open" to load historical parameter combinations into the ranking table, then view curve / calculate positions.</div>
+      <div class="button-row">
+        <button id="history_refresh_btn">Refresh History</button>
+        <button id="history_clear_btn" class="secondary">Clear History</button>
+      </div>
+      <div id="history_status" class="status"></div>
+      <div class="table-wrap">
+        <table id="history_table">
+          <thead>
+            <tr>
+              <th>Time(UTC)</th>
+              <th>Range</th>
+              <th>Top1 APY</th>
+              <th>Top1 Sharpe</th>
+              <th>Top Count</th>
+              <th>Top Symbols</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>6) 历史参数时效性</h2>
+      <div class="hint">可查看历史时效性评估结果，并按某个 L 重新加载当时的具体参数到收益率排名。</div>
+      <div class="button-row">
+        <button id="timeliness_history_refresh_btn">刷新历史</button>
+        <button id="timeliness_history_clear_btn" class="secondary">清空历史</button>
+      </div>
+      <div id="timeliness_history_status" class="status"></div>
+
+      <div class="table-wrap">
+        <table id="timeliness_history_table">
+          <thead>
+            <tr>
+              <th>Time(UTC)</th>
+              <th>T0</th>
+              <th>前瞻周期H(天)</th>
+              <th>Best L</th>
+              <th>L数量</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="timeliness_history_detail_meta" class="status">请选择一条历史参数时效性记录查看明细。</div>
+      <div class="progress-wrap">
+        <div class="progress-track"><div id="timeliness_lookup_progress_fill" class="progress-fill"></div></div>
+        <div id="timeliness_lookup_progress_text" class="progress-text">0%</div>
+      </div>
+      <div id="timeliness_lookup_runtime" class="status">Runtime: idle</div>
+      <div class="table-wrap">
+        <table id="timeliness_history_detail_table">
+          <thead>
+            <tr>
+              <th>L(天)</th>
+              <th>Score</th>
+              <th>完成锚点</th>
+              <th>平均年化</th>
+              <th>平均总收益</th>
+              <th>平均夏普</th>
+              <th>平均回撤</th>
+              <th>胜率</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js?v=20260227c"></script>
+</body>
+</html>
