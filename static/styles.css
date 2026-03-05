@@ -109,6 +109,25 @@ button:disabled {
   color: var(--muted);
 }
 
+.mobile-transfer-qr {
+  margin-top: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: #f8fafc;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.mobile-transfer-qr canvas {
+  width: 180px;
+  height: 180px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
 .table-wrap {
   overflow-x: auto;
 }

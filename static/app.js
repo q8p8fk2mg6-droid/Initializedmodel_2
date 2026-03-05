@@ -15,6 +15,10 @@ let timelinessLookbackLoadState = {
   lookbackDays: 0,
   anchorIndex: 1,
 };
+let latestCalcPlan = null;
+let livePlanSnapshot = null;
+let liveRobotsById = {};
+let selectedLiveRobotId = "";
 
 const progressTimers = {};
 
@@ -25,6 +29,13 @@ function clamp(v, min, max) {
 function parseNumber(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function parseOptionalNumber(v) {
+  const raw = String(v ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function parseApiError(payload, fallback) {
@@ -94,6 +105,60 @@ function showTimelinessHistoryStatus(msg) {
 
 function showTimelinessLookupRuntime(msg) {
   setText("timeliness_lookup_runtime", msg);
+}
+
+function showMobileTransferStatus(msg) {
+  setText("mobile_transfer_status", msg);
+}
+
+function renderMobileTransferQr(importUrl, code) {
+  const wrap = document.getElementById("mobile_transfer_qr_wrap");
+  const canvas = document.getElementById("mobile_transfer_qr_canvas");
+  const caption = document.getElementById("mobile_transfer_qr_caption");
+  if (!wrap || !canvas || !caption) return;
+
+  const url = String(importUrl || "").trim();
+  const transferCode = String(code || "").trim().toUpperCase();
+  if (!url || !transferCode) {
+    wrap.style.display = "none";
+    caption.innerText = "";
+    return;
+  }
+
+  wrap.style.display = "flex";
+  caption.innerText = `扫码后会自动填入导入码。code=${transferCode}`;
+
+  if (!(window.QRCode && typeof window.QRCode.toCanvas === "function")) {
+    caption.innerText = `二维码库加载失败，请手动输入导入码：${transferCode}`;
+    return;
+  }
+
+  window.QRCode.toCanvas(
+    canvas,
+    url,
+    {
+      width: 180,
+      margin: 1,
+      errorCorrectionLevel: "M",
+    },
+    (err) => {
+      if (err) {
+        caption.innerText = `二维码生成失败，请手动输入导入码：${transferCode}`;
+      }
+    }
+  );
+}
+
+function showLiveStatus(msg) {
+  setText("live_status", msg);
+}
+
+function showLivePlanStatus(msg) {
+  setText("live_plan_status", msg);
+}
+
+function showLiveEventsStatus(msg) {
+  setText("live_events_status", msg);
 }
 
 function toMb(v) {
@@ -299,6 +364,8 @@ function collectCustomRequest() {
     throw new Error('Please click "Prefill Custom" in the ranking table first.');
   }
   const reverseDirections = isReverseFillEnabled();
+  const tpPct = parseOptionalNumber(document.getElementById("custom_tp_pct")?.value);
+  const slPct = parseOptionalNumber(document.getElementById("custom_sl_pct")?.value);
   return {
     strategy_id: selectedCustomStrategyId,
     start_date: document.getElementById("custom_start_date").value || document.getElementById("start_date").value,
@@ -308,6 +375,8 @@ function collectCustomRequest() {
       parseNumber(document.getElementById("initial_capital").value, 1000)
     ),
     reverse_directions: reverseDirections,
+    tp_pct: tpPct,
+    sl_pct: slPct,
     ranking_mode: document.getElementById("ranking_mode").value || "sharpe_desc_return_desc",
     binance_api_key: document.getElementById("binance_api_key").value.trim() || null,
     binance_api_secret: document.getElementById("binance_api_secret").value.trim() || null,
@@ -579,6 +648,7 @@ function renderTable(strategies) {
       <td><button class="curve-btn" data-id="${s.strategy_id}">加载</button></td>
       <td><button class="prefill-btn" data-id="${s.strategy_id}">回填自定义</button></td>
       <td><button class="use-btn" data-id="${s.strategy_id}">选用</button></td>
+      <td><button class="export-mobile-btn secondary" data-id="${s.strategy_id}">导出到手机</button></td>
     `;
 
     tr.querySelector(".curve-btn").addEventListener("click", async (e) => {
@@ -617,6 +687,13 @@ function renderTable(strategies) {
       e.stopPropagation();
       const sid = e.currentTarget.dataset.id;
       prefillCustomStrategy(sid);
+    });
+
+    tr.querySelector(".export-mobile-btn").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const sid = String(e.currentTarget.dataset.id || "").trim();
+      if (!sid) return;
+      await exportStrategyForMobile(sid);
     });
 
     tbody.appendChild(tr);
@@ -665,6 +742,45 @@ function prefillCustomStrategy(strategyId) {
       p.short_leverage ?? 0
     ).toFixed(1)}x, 方向=${reverseDirections ? "反向" : "正向"}`
   );
+}
+
+async function exportStrategyForMobile(strategyId) {
+  const sid = String(strategyId || "").trim();
+  if (!sid) {
+    showMobileTransferStatus("导出失败：策略ID为空。");
+    return;
+  }
+  try {
+    const resp = await fetch("/api/strategy-transfer/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        strategy_id: sid,
+        source: "auto",
+        expires_minutes: 60,
+      }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, "导出到手机失败"));
+    const code = String(payload.transfer_code || "").trim().toUpperCase();
+    const importUrl = String(payload.import_url || "").trim();
+    if (!code) throw new Error("导出到手机失败：未返回导入码。");
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(code);
+      } catch (_) {
+        // Ignore clipboard failures and continue with manual copy.
+      }
+    }
+    renderMobileTransferQr(importUrl, code);
+    showMobileTransferStatus(
+      `已导出策略 ${sid}。导入码：${code}（60分钟有效，已复制到剪贴板）。手机打开 ${importUrl}。`
+    );
+    window.prompt("复制导入码并在手机 /mobile 页面导入：", code);
+  } catch (err) {
+    showMobileTransferStatus(err.message || "导出到手机失败");
+  }
 }
 
 async function runBacktest() {
@@ -863,11 +979,14 @@ async function loadTimelinessLookback(runId, lookbackDays, anchorIndex = null) {
 
 async function runCustomBacktest() {
   const req = collectCustomRequest();
+  const tpText = req.tp_pct == null ? "-" : `${Number(req.tp_pct).toFixed(2)}%`;
+  const slText = req.sl_pct == null ? "-" : `${Number(req.sl_pct).toFixed(2)}%`;
   startAutoProgress("backtest", 4, 90, 2, 300);
   setButtonsDisabled(["run_backtest", "run_timeliness", "run_custom_backtest", "apply_rank"], true);
   showStatus(
     "Running custom portfolio backtest..." +
-    (req.reverse_directions ? "（反向模式）" : "（正向模式）")
+    (req.reverse_directions ? "（反向模式）" : "（正向模式）") +
+    ` TP=${tpText}, SL=${slText}`
   );
 
   try {
@@ -888,10 +1007,15 @@ async function runCustomBacktest() {
     openedHistoryFallback = [];
     latestStrategies = payload.strategies || [];
     renderTable(latestStrategies);
+    const top = Array.isArray(latestStrategies) && latestStrategies.length ? latestStrategies[0] : null;
+    const stopTriggered = Boolean(top && top.stop_triggered);
+    const reasonRaw = String(top && top.exit_reason ? top.exit_reason : "end").toLowerCase();
+    const reasonText = reasonRaw === "tp" ? "TP" : (reasonRaw === "sl" ? "SL" : "自然结束");
     stopAutoProgress("backtest", 100);
     showStatus(
       `Custom backtest done: ${req.start_date} ~ ${req.end_date}, initial ${Number(req.initial_capital_usdt).toFixed(2)} USDT, ` +
-      `mode=${req.reverse_directions ? "reverse" : "normal"}.`
+      `mode=${req.reverse_directions ? "reverse" : "normal"}, TP=${tpText}, SL=${slText}, ` +
+      `exit=${reasonText}${stopTriggered ? "（组合级触发）" : ""}.`
     );
   } catch (err) {
     stopAutoProgress("backtest", 100);
@@ -1012,6 +1136,13 @@ async function runPositionCalculator(useStrategy) {
     if (!resp.ok) throw new Error(parseApiError(data, "计算失败"));
 
     renderCalcTable(data.rows || []);
+    latestCalcPlan = {
+      total_capital_usdt: Number(data.total_capital_usdt || 0),
+      total_long_notional: Number(data.total_long_notional || 0),
+      total_short_notional: Number(data.total_short_notional || 0),
+      rows: Array.isArray(data.rows) ? data.rows.map((x) => ({ ...x })) : [],
+      generated_at_ms: Date.now(),
+    };
     const reverseDirections = isReverseFillEnabled();
     showCalcStatus(
       `Done (${reverseDirections ? "reverse" : "normal"}): long notional ${Number(data.total_long_notional).toFixed(2)}, short notional ${Number(
@@ -1313,6 +1444,300 @@ async function clearTimelinessHistoryRuns() {
   }
 }
 
+function fmtUsd(v) {
+  if (v == null || v === "") return "-";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(2);
+}
+
+function fmtPct(v, digits = 4) {
+  if (v == null || v === "") return "-";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return `${n.toFixed(digits)}%`;
+}
+
+function cloneJson(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function importLiveSnapshotFromCalculator() {
+  if (!latestCalcPlan || !Array.isArray(latestCalcPlan.rows) || latestCalcPlan.rows.length === 0) {
+    showLivePlanStatus("导入失败：请先在仓位计算器中成功计算仓位。");
+    return;
+  }
+  livePlanSnapshot = cloneJson(latestCalcPlan);
+  showLivePlanStatus(
+    `已导入快照：${livePlanSnapshot.rows.length} 条仓位，资金=${fmtUsd(livePlanSnapshot.total_capital_usdt)} USDT，` +
+    `多头名义=${fmtUsd(livePlanSnapshot.total_long_notional)}，空头名义=${fmtUsd(livePlanSnapshot.total_short_notional)}。`
+  );
+}
+
+function collectLiveRobotRequest() {
+  if (!livePlanSnapshot || !Array.isArray(livePlanSnapshot.rows) || livePlanSnapshot.rows.length === 0) {
+    throw new Error("请先点击“从仓位计算器导入快照”。");
+  }
+  const name = String(document.getElementById("live_robot_name")?.value || "").trim() || "robot-1";
+  const exchange = String(document.getElementById("live_exchange")?.value || "bybit").toLowerCase();
+  const exchangeAccountRaw = String(document.getElementById("live_exchange_account")?.value || "").trim();
+  const executionMode = String(document.getElementById("live_execution_mode")?.value || "dry-run");
+  const liveApiKeyRaw = String(document.getElementById("live_api_key")?.value || "").trim();
+  const liveApiSecretRaw = String(document.getElementById("live_api_secret")?.value || "").trim();
+  const sharedApiKeyRaw = String(document.getElementById("binance_api_key")?.value || "").trim();
+  const sharedApiSecretRaw = String(document.getElementById("binance_api_secret")?.value || "").trim();
+  const apiKeyRaw = liveApiKeyRaw || sharedApiKeyRaw;
+  const apiSecretRaw = liveApiSecretRaw || sharedApiSecretRaw;
+  const tpPct = parseNumber(document.getElementById("live_tp_pct")?.value, 0);
+  const slPct = parseNumber(document.getElementById("live_sl_pct")?.value, 0);
+  const pollSeconds = Math.trunc(parseNumber(document.getElementById("live_poll_interval")?.value, 10));
+
+  if (!(tpPct > 0)) throw new Error("TP(%) 必须大于 0。");
+  if (!(slPct > 0)) throw new Error("SL(%) 必须大于 0。");
+  if (!(pollSeconds >= 1)) throw new Error("轮询间隔必须 >= 1 秒。");
+
+  return {
+    name,
+    exchange,
+    exchange_account: exchangeAccountRaw || null,
+    tp_pct: tpPct,
+    sl_pct: slPct,
+    poll_interval_seconds: pollSeconds,
+    execution_mode: executionMode,
+    total_capital_usdt: Number(livePlanSnapshot.total_capital_usdt || 0),
+    rows: livePlanSnapshot.rows.map((row) => ({
+      asset: String(row.asset || "").toUpperCase(),
+      direction: String(row.direction || "long").toLowerCase(),
+      weight_pct: Number(row.weight_pct || 0),
+      margin: Number(row.margin || 0),
+      notional: Number(row.notional || 0),
+      leverage: Number(row.leverage || 1),
+    })),
+    source_strategy_id: selectedStrategyId || null,
+    api_key: apiKeyRaw || null,
+    api_secret: apiSecretRaw || null,
+  };
+}
+
+async function createLiveRobot() {
+  let req;
+  try {
+    req = collectLiveRobotRequest();
+  } catch (err) {
+    showLiveStatus(err.message || "创建前校验失败");
+    return;
+  }
+
+  try {
+    const resp = await fetch("/api/live/robots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, "创建机器人失败"));
+    const rid = String(payload.robot_id || "");
+    if (rid) selectedLiveRobotId = rid;
+    showLiveStatus(`机器人创建成功: ${rid} | mode=${req.execution_mode} | exchange=${req.exchange}`);
+    await loadLiveRobots({ quiet: true });
+    if (rid) {
+      await loadLiveRobotEvents(rid);
+    }
+  } catch (err) {
+    showLiveStatus(err.message || "创建机器人失败");
+  }
+}
+
+function renderLiveRobotTable(robots) {
+  const tbody = document.querySelector("#live_robot_table tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  liveRobotsById = {};
+
+  (robots || []).forEach((robot) => {
+    const rid = String(robot.robot_id || "");
+    if (!rid) return;
+    liveRobotsById[rid] = robot;
+    const cfg = robot.config || {};
+    const st = robot.state || {};
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${rid}</td>
+      <td>${cfg.name || "-"}</td>
+      <td>${cfg.exchange || "-"}</td>
+      <td>${cfg.execution_mode || "-"}</td>
+      <td>${st.status || "-"}</td>
+      <td>${fmtUsd(st.current_equity)}</td>
+      <td>${fmtPct(st.pnl_pct)}</td>
+      <td>${st.trigger_reason || "-"}</td>
+      <td>${fmtPct(cfg.tp_pct, 2)} / ${fmtPct(cfg.sl_pct, 2)}</td>
+      <td>${Number(cfg.poll_interval_seconds || 0)}s</td>
+      <td>
+        <button class="live-start-btn" data-id="${rid}">启动</button>
+        <button class="live-check-btn secondary" data-id="${rid}">查看状态</button>
+        <button class="live-stop-btn secondary" data-id="${rid}">停止</button>
+        <button class="live-close-btn secondary" data-id="${rid}">紧急平仓</button>
+        <button class="live-delete-btn secondary" data-id="${rid}">删除</button>
+        <button class="live-events-btn secondary" data-id="${rid}">事件</button>
+      </td>
+    `;
+
+    tr.querySelector(".live-start-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      await liveRobotAction(id, "start");
+    });
+    tr.querySelector(".live-check-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      await liveRobotAction(id, "status-check");
+    });
+    tr.querySelector(".live-stop-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      await liveRobotAction(id, "stop");
+    });
+    tr.querySelector(".live-close-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      await liveRobotAction(id, "close-all");
+    });
+    tr.querySelector(".live-delete-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      await liveRobotAction(id, "delete");
+    });
+    tr.querySelector(".live-events-btn")?.addEventListener("click", async (e) => {
+      const id = e.currentTarget.dataset.id;
+      if (!id) return;
+      selectedLiveRobotId = id;
+      await loadLiveRobotEvents(id);
+    });
+
+    tbody.appendChild(tr);
+  });
+
+  if (!selectedLiveRobotId && robots && robots.length) {
+    selectedLiveRobotId = String(robots[0].robot_id || "");
+  }
+}
+
+async function loadLiveRobots(options = {}) {
+  const quiet = Boolean(options && options.quiet);
+  try {
+    const resp = await fetch("/api/live/robots");
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, "加载机器人列表失败"));
+    const robots = payload.robots || [];
+    renderLiveRobotTable(robots);
+    if (!quiet) showLiveStatus(`已加载 ${robots.length} 个机器人。`);
+  } catch (err) {
+    if (!quiet) showLiveStatus(err.message || "加载机器人列表失败");
+  }
+}
+
+async function liveRobotAction(robotId, action) {
+  const rid = String(robotId || "").trim();
+  if (!rid) return;
+  const liveApiKeyRaw = String(document.getElementById("live_api_key")?.value || "").trim();
+  const liveApiSecretRaw = String(document.getElementById("live_api_secret")?.value || "").trim();
+  const sharedApiKeyRaw = String(document.getElementById("binance_api_key")?.value || "").trim();
+  const sharedApiSecretRaw = String(document.getElementById("binance_api_secret")?.value || "").trim();
+  const runtimeApiKey = liveApiKeyRaw || sharedApiKeyRaw;
+  const runtimeApiSecret = liveApiSecretRaw || sharedApiSecretRaw;
+  const actionMap = {
+    start: { url: `/api/live/robots/${encodeURIComponent(rid)}/start`, label: "启动", method: "POST", withBody: true },
+    stop: { url: `/api/live/robots/${encodeURIComponent(rid)}/stop`, label: "停止", method: "POST" },
+    "close-all": { url: `/api/live/robots/${encodeURIComponent(rid)}/close-all`, label: "紧急平仓", method: "POST" },
+    "status-check": { url: `/api/live/robots/${encodeURIComponent(rid)}/status-check`, label: "查看状态", method: "POST", withBody: true },
+    delete: { url: `/api/live/robots/${encodeURIComponent(rid)}`, label: "删除", method: "DELETE" },
+  };
+  const info = actionMap[action];
+  if (!info) return;
+  if (action === "delete") {
+    const ok = window.confirm(`确认删除机器人 ${rid}？此操作不会自动平仓。`);
+    if (!ok) return;
+  }
+
+  try {
+    const fetchInit = { method: info.method || "POST" };
+    if (info.withBody) {
+      fetchInit.headers = { "Content-Type": "application/json" };
+      fetchInit.body = JSON.stringify({
+        api_key: runtimeApiKey || null,
+        api_secret: runtimeApiSecret || null,
+      });
+    }
+    const resp = await fetch(info.url, fetchInit);
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, `${info.label}失败`));
+    if (action === "delete") {
+      if (selectedLiveRobotId === rid) {
+        selectedLiveRobotId = "";
+        renderLiveEvents([]);
+        showLiveEventsStatus("请选择机器人查看事件日志。");
+      }
+      showLiveStatus(`${info.label}成功: ${rid}`);
+      await loadLiveRobots({ quiet: true });
+      return;
+    }
+
+    selectedLiveRobotId = rid;
+    if (action === "status-check") {
+      const st = payload.state || {};
+      const statusText = String(st.status || "-");
+      const runningText = String(Boolean(st.running));
+      const errText = String(st.last_error || "").trim();
+      showLiveStatus(
+        errText
+          ? `${info.label}完成: ${rid} | running=${runningText} | status=${statusText} | error=${errText}`
+          : `${info.label}完成: ${rid} | running=${runningText} | status=${statusText}`
+      );
+    } else {
+      showLiveStatus(`${info.label}成功: ${rid}`);
+    }
+    await loadLiveRobots({ quiet: true });
+    await loadLiveRobotEvents(rid);
+  } catch (err) {
+    showLiveStatus(err.message || `${info.label}失败`);
+  }
+}
+
+function renderLiveEvents(events) {
+  const tbody = document.querySelector("#live_events_table tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  (events || []).forEach((ev) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${String(ev.timestamp || "").replace("T", " ").replace("Z", "")}</td>
+      <td>${ev.level || "-"}</td>
+      <td>${ev.type || "-"}</td>
+      <td>${ev.message || "-"}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadLiveRobotEvents(robotId, limit = 100) {
+  const rid = String(robotId || "").trim();
+  if (!rid) {
+    showLiveEventsStatus("请选择机器人查看事件日志。");
+    renderLiveEvents([]);
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/live/robots/${encodeURIComponent(rid)}/events?limit=${encodeURIComponent(limit)}`);
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, "加载事件日志失败"));
+    const events = payload.events || [];
+    renderLiveEvents(events);
+    showLiveEventsStatus(`机器人 ${rid} 事件 ${events.length} 条。`);
+  } catch (err) {
+    showLiveEventsStatus(err.message || "加载事件日志失败");
+  }
+}
+
 function setDefaultDates() {
   const end = new Date();
   const start = new Date(end.getTime() - 180 * 24 * 3600 * 1000);
@@ -1356,6 +1781,15 @@ if (timelinessHistoryRefreshBtn) timelinessHistoryRefreshBtn.addEventListener("c
 const timelinessHistoryClearBtn = document.getElementById("timeliness_history_clear_btn");
 if (timelinessHistoryClearBtn) timelinessHistoryClearBtn.addEventListener("click", clearTimelinessHistoryRuns);
 
+const liveImportCalcBtn = document.getElementById("live_import_calc_btn");
+if (liveImportCalcBtn) liveImportCalcBtn.addEventListener("click", importLiveSnapshotFromCalculator);
+
+const liveRefreshBtn = document.getElementById("live_refresh_btn");
+if (liveRefreshBtn) liveRefreshBtn.addEventListener("click", () => loadLiveRobots());
+
+const liveCreateBtn = document.getElementById("live_create_btn");
+if (liveCreateBtn) liveCreateBtn.addEventListener("click", createLiveRobot);
+
 setDefaultDates();
 const initialCapitalEl = document.getElementById("initial_capital");
 const customInitialCapitalEl = document.getElementById("custom_initial_capital");
@@ -1369,8 +1803,14 @@ showTimelinessLookupRuntime("Runtime: idle");
 resolveLookbackAnchorIndex("");
 loadHistoryRuns().catch(() => {});
 loadTimelinessHistoryRuns().catch(() => {});
+loadLiveRobots({ quiet: true }).catch(() => {});
 refreshRuntimeStatus().catch(() => {});
 setInterval(() => {
   refreshRuntimeStatus().catch(() => {});
 }, 1500);
-
+setInterval(() => {
+  loadLiveRobots({ quiet: true }).catch(() => {});
+  if (selectedLiveRobotId) {
+    loadLiveRobotEvents(selectedLiveRobotId, 50).catch(() => {});
+  }
+}, 4000);

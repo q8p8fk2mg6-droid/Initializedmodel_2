@@ -6,6 +6,7 @@
   <title>Binance Perp Carry Optimizer</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260223a" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -65,8 +66,8 @@
       </div>
 
       <div class="grid">
-        <label>Binance API Key（可选）<input id="binance_api_key" type="password" autocomplete="off" /></label>
-        <label>Binance API Secret（可选）<input id="binance_api_secret" type="password" autocomplete="off" /></label>
+        <label>交易所 API Key（可选）<input id="binance_api_key" type="password" autocomplete="off" /></label>
+        <label>交易所 API Secret（可选）<input id="binance_api_secret" type="password" autocomplete="off" /></label>
       </div>
 
       <div class="button-row">
@@ -120,6 +121,8 @@
         <label>开始日期<input id="custom_start_date" type="date" /></label>
         <label>结束日期<input id="custom_end_date" type="date" /></label>
         <label>初始仓位(USDT)<input id="custom_initial_capital" type="number" value="1000" min="1" /></label>
+        <label>组合TP(%)<input id="custom_tp_pct" type="number" min="0.01" step="0.01" placeholder="例如 8.5" /></label>
+        <label>组合SL(%)<input id="custom_sl_pct" type="number" min="0.01" step="0.01" placeholder="例如 4.0" /></label>
       </div>
     </section>
 
@@ -147,6 +150,13 @@
           反向回填（多空互换，作用于“回填自定义”和“仓位计算”）
         </label>
       </div>
+      <div id="mobile_transfer_status" class="status">
+        手机导入：在下方策略表点击“导出到手机”，然后在手机打开 <code>/mobile</code> 输入导入码。
+      </div>
+      <div id="mobile_transfer_qr_wrap" class="mobile-transfer-qr" style="display:none;">
+        <canvas id="mobile_transfer_qr_canvas" width="180" height="180"></canvas>
+        <div id="mobile_transfer_qr_caption" class="hint"></div>
+      </div>
       <div class="table-wrap">
         <table id="result_table">
           <thead>
@@ -166,6 +176,7 @@
               <th>曲线</th>
               <th>回填自定义</th>
               <th>仓位</th>
+              <th>手机导入</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -289,8 +300,82 @@
         </table>
       </div>
     </section>
+
+    <section class="card">
+      <h2>7) 实盘机器人（Bybit Live + Dry-Run）</h2>
+      <div class="hint">先在“仓位计算器”完成计算，然后点击“从仓位计算器导入快照”创建机器人。TP/SL 为组合级；触发后会执行整体平仓。建议先 dry-run，再 live。若使用表单 API Key/Secret，仅在当前进程内有效。</div>
+
+      <div class="button-row">
+        <button id="live_import_calc_btn">从仓位计算器导入快照</button>
+        <button id="live_refresh_btn" class="secondary">刷新机器人列表</button>
+      </div>
+      <div id="live_plan_status" class="status">尚未导入仓位快照。</div>
+
+      <div class="grid">
+        <label>机器人名称<input id="live_robot_name" type="text" value="robot-1" /></label>
+        <label>交易所
+          <select id="live_exchange">
+            <option value="bybit" selected>Bybit</option>
+            <option value="binance">Binance</option>
+          </select>
+        </label>
+        <label>交易账户标识（可选）<input id="live_exchange_account" type="text" placeholder="例如 main-account" /></label>
+        <label>组合TP(%)<input id="live_tp_pct" type="number" value="8" min="0.01" step="0.01" /></label>
+        <label>组合SL(%)<input id="live_sl_pct" type="number" value="4" min="0.01" step="0.01" /></label>
+        <label>轮询间隔(秒)<input id="live_poll_interval" type="number" value="10" min="1" max="3600" /></label>
+        <label>执行模式
+          <select id="live_execution_mode">
+            <option value="dry-run" selected>dry-run</option>
+            <option value="live">live（Bybit）</option>
+          </select>
+        </label>
+        <label>实盘 API Key（Bybit）<input id="live_api_key" type="password" autocomplete="off" /></label>
+        <label>实盘 API Secret（Bybit）<input id="live_api_secret" type="password" autocomplete="off" /></label>
+      </div>
+
+      <div class="button-row">
+        <button id="live_create_btn">创建机器人</button>
+      </div>
+      <div id="live_status" class="status"></div>
+
+      <div class="table-wrap">
+        <table id="live_robot_table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>名称</th>
+              <th>交易所</th>
+              <th>模式</th>
+              <th>状态</th>
+              <th>当前净值</th>
+              <th>组合盈亏%</th>
+              <th>触发原因</th>
+              <th>TP/SL</th>
+              <th>轮询</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="live_events_status" class="status">请选择机器人查看事件日志。</div>
+      <div class="table-wrap">
+        <table id="live_events_table">
+          <thead>
+            <tr>
+              <th>时间(UTC)</th>
+              <th>级别</th>
+              <th>类型</th>
+              <th>内容</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
   </div>
 
-  <script src="/static/app.js?v=20260227c"></script>
+  <script src="/static/app.js?v=20260301d"></script>
 </body>
 </html>

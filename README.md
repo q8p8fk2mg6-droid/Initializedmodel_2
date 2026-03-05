@@ -38,3 +38,67 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 - New env settings:
   - `HISTORY_STORE_PATH=.cache/history/top_runs.json`
   - `HISTORY_STORE_MAX_RUNS=500`
+
+## Stage-4 Live Robot (MVP)
+- New frontend section: `7) 实盘机器人（MVP Dry-Run）`.
+- Workflow:
+  - Run position calculator first.
+  - Click `从仓位计算器导入快照`.
+  - Fill robot config (exchange / TP% / SL% / poll seconds / mode).
+  - Create robot and control it with start/stop/close-all.
+- TP/SL is portfolio-level (overall equity), not per-contract.
+- Legacy note: first MVP version was `dry-run` only.
+- Live robot APIs:
+  - `POST /api/live/robots`
+  - `GET /api/live/robots`
+  - `GET /api/live/robots/{robot_id}`
+  - `POST /api/live/robots/{robot_id}/start`
+  - `POST /api/live/robots/{robot_id}/stop`
+  - `POST /api/live/robots/{robot_id}/close-all`
+  - `POST /api/live/robots/{robot_id}/status-check`
+  - `DELETE /api/live/robots/{robot_id}`
+  - `GET /api/live/robots/{robot_id}/events`
+- New env settings:
+  - `LIVE_ROBOT_STORE_PATH=.cache/live/robots.json`
+  - `LIVE_ROBOT_STORE_MAX_ROBOTS=200`
+  - `LIVE_ROBOT_STORE_MAX_EVENTS=1000`
+
+## Stage-4.1 Live Update (Bybit)
+- Live mode is now available for Bybit linear contracts.
+- Portfolio-level TP/SL (live) is evaluated by strategy contracts PnL only:
+  - `pnl_pct = unrealized_pnl_of_robot_symbols / base_capital_of_robot * 100%`
+  - Spot holdings and unrelated account assets are excluded from TP/SL calculation.
+  - `pnl_pct >= TP%` => close all
+  - `pnl_pct <= -SL%` => close all
+- Order handling in live mode:
+  - Open positions by market orders from calculator snapshot.
+  - Start includes margin precheck; if estimated required margin exceeds available balance, start is rejected before sending any open orders.
+  - Leverage is normalized by exchange step using ceiling (example: requested `1.5`, exchange step `0.2` => applied `1.6`).
+  - Close-all uses reduce-only market orders.
+  - If open flow fails, engine attempts rollback by close-all.
+- Credential priority:
+  - Runtime request (`api_key` + `api_secret`) first.
+  - Then environment variables.
+- Status after interruption/restart:
+  - Robot configs/events persist in store and can be viewed after reopening frontend.
+  - Backend process restart does not auto-resume monitor thread.
+  - Use `status-check` to probe current worker/position state.
+- New env settings for live:
+  - `BYBIT_API_KEY=`
+  - `BYBIT_API_SECRET=`
+  - `BYBIT_BASE_URL=https://api.bybit.com`
+  - `BYBIT_RECV_WINDOW_MS=10000`
+  - `BINANCE_FUTURES_BASE_URL=https://fapi.binance.com`
+
+## Stage-4.2 Mobile Control + Strategy Transfer
+- New mobile page:
+  - `GET /mobile`
+- Desktop ranking table now supports `Export to Mobile` per strategy.
+- Strategy transfer APIs:
+  - `POST /api/strategy-transfer/export`
+  - `POST /api/strategy-transfer/import`
+- Transfer store env settings:
+  - `STRATEGY_TRANSFER_STORE_PATH=.cache/live/strategy_transfer.json`
+  - `STRATEGY_TRANSFER_STORE_MAX_ITEMS=1000`
+  - `STRATEGY_TRANSFER_DEFAULT_TTL_MINUTES=60`
+  - `STRATEGY_TRANSFER_MAX_TTL_MINUTES=1440`

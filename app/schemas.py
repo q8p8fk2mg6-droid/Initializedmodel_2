@@ -92,6 +92,12 @@ class BacktestCandidate(BaseModel):
     rehedge_count: int
     equity_curve: list[list[float | int]]
     portfolio: list[PortfolioLegModel]
+    tp_pct: float | None = None
+    sl_pct: float | None = None
+    stop_triggered: bool = False
+    exit_reason: Literal["tp", "sl", "end"] | None = None
+    exit_timestamp_ms: int | None = None
+    exit_nav: float | None = None
 
 
 class BacktestResponse(BaseModel):
@@ -259,6 +265,8 @@ class CustomBacktestRequest(BaseModel):
     rebalance_threshold_pct: float = Field(default=1.0, ge=0.0, le=100.0)
     long_leverage: float = Field(default=1.0, ge=1.0, le=20.0)
     short_leverage: float = Field(default=1.0, ge=1.0, le=20.0)
+    tp_pct: float | None = Field(default=None, gt=0.0, le=1000.0)
+    sl_pct: float | None = Field(default=None, gt=0.0, le=100.0)
     ranking_mode: Literal["return_desc", "mdd_asc_return_desc", "sharpe_desc_return_desc"] = "sharpe_desc_return_desc"
 
     @model_validator(mode="after")
@@ -274,6 +282,8 @@ class RefillCustomBacktestRequest(BaseModel):
     end_date: date
     initial_capital_usdt: float = Field(default=1000.0, gt=0)
     reverse_directions: bool = False
+    tp_pct: float | None = Field(default=None, gt=0.0, le=1000.0)
+    sl_pct: float | None = Field(default=None, gt=0.0, le=100.0)
     ranking_mode: Literal["return_desc", "mdd_asc_return_desc", "sharpe_desc_return_desc"] = "sharpe_desc_return_desc"
     binance_api_key: str | None = None
     binance_api_secret: str | None = None
@@ -341,3 +351,159 @@ class HistoryRunRecord(BaseModel):
 
 class HistoryRunsResponse(BaseModel):
     runs: list[HistoryRunRecord]
+
+
+class LiveRobotPlanRow(BaseModel):
+    asset: str
+    direction: Literal["long", "short"]
+    weight_pct: float = Field(gt=0.0, le=100.0)
+    margin: float = Field(gt=0.0)
+    notional: float = Field(gt=0.0)
+    leverage: float = Field(ge=1.0, le=100.0)
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, value: str) -> str:
+        sym = str(value or "").upper().strip()
+        if not sym:
+            raise ValueError("asset is required")
+        return sym
+
+
+class LiveRobotCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    exchange: Literal["bybit", "binance"] = "bybit"
+    exchange_account: str | None = Field(default=None, max_length=120)
+    tp_pct: float = Field(gt=0.0, le=1000.0)
+    sl_pct: float = Field(gt=0.0, le=100.0)
+    poll_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    execution_mode: Literal["dry-run", "live"] = "dry-run"
+    total_capital_usdt: float = Field(gt=0.0)
+    rows: list[LiveRobotPlanRow] = Field(min_length=1, max_length=30)
+    source_strategy_id: str | None = None
+    api_key: str | None = None
+    api_secret: str | None = None
+
+    @model_validator(mode="after")
+    def validate_credentials_pair(self) -> "LiveRobotCreateRequest":
+        has_key = bool(str(self.api_key or "").strip())
+        has_secret = bool(str(self.api_secret or "").strip())
+        if has_key != has_secret:
+            raise ValueError("api_key and api_secret must be provided together")
+        return self
+
+
+class LiveRobotStartRequest(BaseModel):
+    api_key: str | None = None
+    api_secret: str | None = None
+
+    @model_validator(mode="after")
+    def validate_credentials_pair(self) -> "LiveRobotStartRequest":
+        has_key = bool(str(self.api_key or "").strip())
+        has_secret = bool(str(self.api_secret or "").strip())
+        if has_key != has_secret:
+            raise ValueError("api_key and api_secret must be provided together")
+        return self
+
+
+class LiveRobotEvent(BaseModel):
+    event_id: str
+    timestamp: str
+    level: str
+    type: str
+    message: str
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiveRobotState(BaseModel):
+    status: str
+    running: bool
+    started_at: str | None = None
+    stopped_at: str | None = None
+    base_equity: float | None = None
+    current_equity: float | None = None
+    pnl_pct: float | None = None
+    trigger_reason: str | None = None
+    last_error: str | None = None
+    last_heartbeat: str | None = None
+    entry_prices: dict[str, float] = Field(default_factory=dict)
+
+
+class LiveRobotConfig(BaseModel):
+    name: str
+    exchange: Literal["bybit", "binance"]
+    exchange_account: str | None = None
+    tp_pct: float
+    sl_pct: float
+    poll_interval_seconds: int
+    execution_mode: Literal["dry-run", "live"]
+    credentials_mode: Literal["runtime", "env", "none"] = "none"
+    total_capital_usdt: float
+    rows: list[LiveRobotPlanRow]
+    source_strategy_id: str | None = None
+
+
+class LiveRobotRecord(BaseModel):
+    robot_id: str
+    created_at: str
+    updated_at: str
+    config: LiveRobotConfig
+    state: LiveRobotState
+    events: list[LiveRobotEvent] = Field(default_factory=list)
+
+
+class LiveRobotListResponse(BaseModel):
+    robots: list[LiveRobotRecord]
+
+
+class LiveRobotEventsResponse(BaseModel):
+    robot_id: str
+    events: list[LiveRobotEvent]
+
+
+class LiveRobotDeleteResponse(BaseModel):
+    deleted: bool
+    robot_id: str
+
+
+class StrategyTransferPayload(BaseModel):
+    strategy_id: str
+    source: Literal["runtime", "history", "unknown"] = "unknown"
+    rank: int | None = None
+    annualized_return: float | None = None
+    total_return: float | None = None
+    sharpe: float | None = None
+    max_drawdown: float | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    portfolio: list[PortfolioLegModel] = Field(default_factory=list)
+
+
+class StrategyTransferExportRequest(BaseModel):
+    strategy_id: str
+    source: Literal["auto", "runtime", "history"] = "auto"
+    expires_minutes: int | None = Field(default=None, ge=1, le=10080)
+
+
+class StrategyTransferExportResponse(BaseModel):
+    transfer_code: str
+    created_at: str
+    expires_at: str
+    import_url: str
+    strategy: StrategyTransferPayload
+
+
+class StrategyTransferImportRequest(BaseModel):
+    transfer_code: str = Field(min_length=4, max_length=32)
+    consume: bool = True
+
+    @field_validator("transfer_code")
+    @classmethod
+    def normalize_transfer_code(cls, value: str) -> str:
+        return str(value or "").strip().upper()
+
+
+class StrategyTransferImportResponse(BaseModel):
+    transfer_code: str
+    expires_at: str
+    consumed_at: str | None = None
+    strategy: StrategyTransferPayload

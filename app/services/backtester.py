@@ -28,6 +28,8 @@ class PortfolioBacktester:
         portfolio: PortfolioSpec,
         params: StrategyParams,
         initial_capital_usdt: float,
+        tp_pct: float | None = None,
+        sl_pct: float | None = None,
     ) -> dict[str, Any]:
         prices = market_data.prices.copy()
         funding = market_data.funding.copy()
@@ -93,6 +95,14 @@ class PortfolioBacktester:
         periods = 0
 
         threshold_bps = float(params.rebalance_threshold_pct) * 100.0
+        tp_pct_val = float(tp_pct) if tp_pct is not None and np.isfinite(tp_pct) and float(tp_pct) > 0.0 else None
+        sl_pct_val = float(sl_pct) if sl_pct is not None and np.isfinite(sl_pct) and float(sl_pct) > 0.0 else None
+        base_nav = max(float(initial_capital_usdt), 1e-9)
+        tp_target_nav = base_nav * (1.0 + tp_pct_val / 100.0) if tp_pct_val is not None else None
+        sl_target_nav = base_nav * (1.0 - sl_pct_val / 100.0) if sl_pct_val is not None else None
+        stop_triggered = False
+        exit_reason = "end"
+        exit_timestamp_ms = int(timestamps[last_idx].timestamp() * 1000)
 
         for i in range(1, len(timestamps)):
             prev_row = price_arr[i - 1]
@@ -132,6 +142,24 @@ class PortfolioBacktester:
                 rehedge_count += 1
                 last_rehedge_ts = ts
 
+            trigger_reason: str | None = None
+            if tp_target_nav is not None and nav >= tp_target_nav:
+                trigger_reason = "tp"
+            elif sl_target_nav is not None and nav <= sl_target_nav:
+                trigger_reason = "sl"
+
+            if trigger_reason is not None:
+                close_mask = (np.abs(qty) > 0.0) & (cur_row > 0.0)
+                if np.any(close_mask):
+                    close_notional = float(np.abs(qty[close_mask] * cur_row[close_mask]).sum())
+                    close_fee = close_notional * market_data.fee_rate
+                    trading_fees += close_fee
+                    nav -= close_fee
+                    qty[close_mask] = 0.0
+                stop_triggered = True
+                exit_reason = trigger_reason
+                exit_timestamp_ms = int(ts.timestamp() * 1000)
+
             ret = 0.0
             if prev_nav != 0.0:
                 ret = nav / prev_nav - 1.0
@@ -150,8 +178,10 @@ class PortfolioBacktester:
                 if drawdown < max_drawdown:
                     max_drawdown = float(drawdown)
 
-            if (i % stride == 0) or (i == last_idx):
+            if stop_triggered or (i % stride == 0) or (i == last_idx):
                 equity_curve.append([int(ts.timestamp() * 1000), float(nav)])
+            if stop_triggered:
+                break
 
         return self._finalize_metrics_fast(
             params={
@@ -172,6 +202,11 @@ class PortfolioBacktester:
             returns_sq_sum=returns_sq_sum,
             returns_count=returns_count,
             max_drawdown=max_drawdown,
+            tp_pct=tp_pct_val,
+            sl_pct=sl_pct_val,
+            stop_triggered=stop_triggered,
+            exit_reason=exit_reason,
+            exit_timestamp_ms=exit_timestamp_ms,
         )
 
     @staticmethod
@@ -195,6 +230,11 @@ class PortfolioBacktester:
         returns_sq_sum: float,
         returns_count: int,
         max_drawdown: float,
+        tp_pct: float | None,
+        sl_pct: float | None,
+        stop_triggered: bool,
+        exit_reason: str,
+        exit_timestamp_ms: int,
     ) -> dict[str, Any]:
         start_nav_safe = max(float(start_nav), 1e-9)
         total_return = float(end_nav / start_nav_safe - 1.0)
@@ -223,4 +263,10 @@ class PortfolioBacktester:
             "trading_fees": float(trading_fees),
             "rehedge_count": rehedge_count,
             "equity_curve": equity_curve,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "stop_triggered": bool(stop_triggered),
+            "exit_reason": "end" if not stop_triggered else str(exit_reason),
+            "exit_timestamp_ms": int(exit_timestamp_ms),
+            "exit_nav": float(end_nav),
         }

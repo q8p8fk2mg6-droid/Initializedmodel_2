@@ -7,12 +7,13 @@ from typing import Any
 import time as time_module
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.clients.binance import BinanceClient
+from app.clients.exchange_adapter import ExchangeAdapterRegistry
 from app.config import settings
 from app.schemas import (
     BacktestRequest,
@@ -31,6 +32,17 @@ from app.schemas import (
     RefillCustomBacktestRequest,
     HistoryRunRecord,
     HistoryRunsResponse,
+    LiveRobotCreateRequest,
+    LiveRobotDeleteResponse,
+    LiveRobotEventsResponse,
+    LiveRobotListResponse,
+    LiveRobotRecord,
+    LiveRobotStartRequest,
+    StrategyTransferExportRequest,
+    StrategyTransferExportResponse,
+    StrategyTransferImportRequest,
+    StrategyTransferImportResponse,
+    StrategyTransferPayload,
 )
 from app.services.backtester import PortfolioBacktester, StrategyParams as EngineStrategyParams
 from app.services.data_loader import MarketDataLoader
@@ -39,6 +51,10 @@ from app.services.optimizer import PortfolioOptimizer
 from app.services.portfolio import PortfolioLeg, normalize_portfolio
 from app.services.position_sizer import build_position_plan
 from app.services.timeliness_history_store import TimelinessHistoryStore
+from app.services.live_robot_store import LiveRobotStore
+from app.services.live_robot_engine import LiveRobotEngine
+from app.services.mobile_notifier import MobileNotifier, MobileNotifierConfig
+from app.services.strategy_transfer_store import StrategyTransferStore
 from app.storage import runtime_store
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -62,6 +78,42 @@ history_store = BacktestHistoryStore(
 timeliness_history_store = TimelinessHistoryStore(
     file_path=settings.timeliness_history_store_path,
     max_runs=settings.timeliness_history_store_max_runs,
+)
+live_robot_store = LiveRobotStore(
+    file_path=settings.live_robot_store_path,
+    max_robots=settings.live_robot_store_max_robots,
+    max_events=settings.live_robot_store_max_events,
+)
+strategy_transfer_store = StrategyTransferStore(
+    file_path=settings.strategy_transfer_store_path,
+    max_items=settings.strategy_transfer_store_max_items,
+    default_ttl_minutes=settings.strategy_transfer_default_ttl_minutes,
+    max_ttl_minutes=settings.strategy_transfer_max_ttl_minutes,
+)
+exchange_adapter_registry = ExchangeAdapterRegistry(
+    bybit_base_url=settings.bybit_base_url,
+    binance_futures_base_url=settings.binance_futures_base_url,
+    bybit_recv_window_ms=settings.bybit_recv_window_ms,
+)
+mobile_notifier = MobileNotifier(
+    MobileNotifierConfig(
+        enabled=settings.mobile_notify_enabled,
+        provider=settings.mobile_notify_provider,
+        timeout_seconds=settings.mobile_notify_timeout_seconds,
+        heartbeat_minutes=settings.mobile_notify_heartbeat_minutes,
+        ntfy_base_url=settings.mobile_notify_ntfy_base_url,
+        ntfy_topic=settings.mobile_notify_ntfy_topic,
+        ntfy_token=settings.mobile_notify_ntfy_token,
+        telegram_bot_token=settings.mobile_notify_telegram_bot_token,
+        telegram_chat_id=settings.mobile_notify_telegram_chat_id,
+        webhook_url=settings.mobile_notify_webhook_url,
+        webhook_bearer_token=settings.mobile_notify_webhook_bearer_token,
+    )
+)
+live_robot_engine = LiveRobotEngine(
+    store=live_robot_store,
+    exchange_registry=exchange_adapter_registry,
+    notifier=mobile_notifier,
 )
 
 
@@ -262,6 +314,87 @@ def _strategy_to_history_item(item: dict[str, Any]) -> dict[str, Any]:
         "rehedge_count": int(item.get("rehedge_count", 0)),
         "portfolio": [dict(leg) for leg in item.get("portfolio", [])],
         "equity_curve": [list(point) for point in item.get("equity_curve", [])],
+    }
+
+
+def _get_strategy_for_transfer(strategy_id: str, source: str) -> tuple[dict[str, Any] | None, str]:
+    sid = str(strategy_id or "").strip()
+    src = str(source or "auto").strip().lower()
+    if not sid:
+        return None, "unknown"
+
+    if src in {"auto", "runtime"}:
+        strategy = runtime_store.get_strategy(sid)
+        if strategy is not None:
+            return dict(strategy), "runtime"
+        if src == "runtime":
+            return None, "runtime"
+
+    if src in {"auto", "history"}:
+        strategy = history_store.find_strategy(sid)
+        if strategy is not None:
+            return dict(strategy), "history"
+        return None, "history"
+
+    return None, "unknown"
+
+
+def _build_strategy_transfer_payload(strategy: dict[str, Any], source: str) -> dict[str, Any]:
+    rank_value: int | None
+    try:
+        rank_value = int(strategy.get("rank")) if strategy.get("rank") is not None else None
+    except Exception:
+        rank_value = None
+
+    def _safe_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    raw_portfolio = strategy.get("portfolio", [])
+    portfolio_items: list[dict[str, Any]] = []
+    if isinstance(raw_portfolio, list):
+        for leg in raw_portfolio:
+            if not isinstance(leg, dict):
+                continue
+            try:
+                weight = float(leg.get("weight", 0.0))
+            except Exception:
+                weight = 0.0
+            direction = str(leg.get("direction", "long")).strip().lower()
+            if direction not in {"long", "short"}:
+                direction = "long"
+            lev_raw = leg.get("leverage", None)
+            leverage: float | None
+            if lev_raw is None:
+                leverage = None
+            else:
+                try:
+                    leverage = float(lev_raw)
+                except Exception:
+                    leverage = None
+            portfolio_items.append(
+                {
+                    "asset": str(leg.get("asset", "")).upper().strip(),
+                    "weight": weight,
+                    "direction": direction,
+                    "leverage": leverage,
+                }
+            )
+
+    return {
+        "strategy_id": str(strategy.get("strategy_id", "")).strip(),
+        "source": str(source or "unknown"),
+        "rank": rank_value,
+        "annualized_return": _safe_float(strategy.get("annualized_return")),
+        "total_return": _safe_float(strategy.get("total_return")),
+        "sharpe": _safe_float(strategy.get("sharpe")),
+        "max_drawdown": _safe_float(strategy.get("max_drawdown")),
+        "params": dict(strategy.get("params", {})) if isinstance(strategy.get("params", {}), dict) else {},
+        "portfolio": portfolio_items,
     }
 
 
@@ -714,6 +847,18 @@ def home() -> FileResponse:
     )
 
 
+@app.get("/mobile")
+def mobile_home() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "mobile.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -723,6 +868,11 @@ def health() -> dict:
 def get_runtime_status() -> dict[str, Any]:
     stats = optimizer.get_runtime_stats()
     stats["timeliness"] = timeliness_runtime.get()
+    running_robot_id = live_robot_store.find_running_robot_id()
+    stats["live_robot"] = {
+        "running_robot_id": running_robot_id,
+        "robot_count": len(live_robot_store.list_robots()),
+    }
     return stats
 
 
@@ -734,6 +884,250 @@ def get_universe(limit: int = 100) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"limit": limit, "symbols": symbols}
+
+
+@app.post("/api/strategy-transfer/export", response_model=StrategyTransferExportResponse)
+def export_strategy_transfer(req: StrategyTransferExportRequest, request: Request) -> StrategyTransferExportResponse:
+    strategy, source_used = _get_strategy_for_transfer(req.strategy_id, req.source)
+    if strategy is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Strategy not found: {req.strategy_id}. "
+                "Please run/open strategy ranking first, or switch source(runtime/history)."
+            ),
+        )
+
+    payload = StrategyTransferPayload.model_validate(
+        _build_strategy_transfer_payload(strategy, source_used)
+    ).model_dump(mode="json")
+    record = strategy_transfer_store.create_transfer(
+        payload=payload,
+        source={
+            "source": source_used,
+            "strategy_id": str(req.strategy_id).strip(),
+            "request_source": str(req.source or "auto").strip().lower(),
+        },
+        expires_minutes=req.expires_minutes,
+    )
+    base_url = str(request.base_url).rstrip("/")
+    transfer_code = str(record.get("transfer_code", "")).strip().upper()
+    import_url = f"{base_url}/mobile?code={transfer_code}"
+    return StrategyTransferExportResponse(
+        transfer_code=transfer_code,
+        created_at=str(record.get("created_at", "")),
+        expires_at=str(record.get("expires_at", "")),
+        import_url=import_url,
+        strategy=StrategyTransferPayload.model_validate(record.get("payload", {})),
+    )
+
+
+@app.post("/api/strategy-transfer/import", response_model=StrategyTransferImportResponse)
+def import_strategy_transfer(req: StrategyTransferImportRequest) -> StrategyTransferImportResponse:
+    record = strategy_transfer_store.get_transfer(req.transfer_code, consume=bool(req.consume))
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Transfer code is invalid/expired or already consumed.",
+        )
+    consumed_at = str(record.get("consumed_at", "")).strip() or None
+    return StrategyTransferImportResponse(
+        transfer_code=str(record.get("transfer_code", "")).strip().upper(),
+        expires_at=str(record.get("expires_at", "")),
+        consumed_at=consumed_at,
+        strategy=StrategyTransferPayload.model_validate(record.get("payload", {})),
+    )
+
+
+@app.post("/api/live/robots", response_model=LiveRobotRecord)
+def create_live_robot(req: LiveRobotCreateRequest) -> LiveRobotRecord:
+    req_exchange = str(req.exchange).lower().strip()
+    req_mode = str(req.execution_mode).lower().strip()
+    if req_mode == "live" and req_exchange == "binance":
+        raise HTTPException(
+            status_code=400,
+            detail="Live execution for Binance is not implemented yet. Please use Bybit or dry-run.",
+        )
+
+    has_runtime_creds = bool(str(req.api_key or "").strip()) and bool(str(req.api_secret or "").strip())
+    has_env_creds = False
+    if req_exchange == "bybit":
+        has_env_creds = bool(str(settings.bybit_api_key or "").strip()) and bool(str(settings.bybit_api_secret or "").strip())
+    elif req_exchange == "binance":
+        has_env_creds = bool(str(settings.binance_api_key or "").strip()) and bool(str(settings.binance_api_secret or "").strip())
+    credentials_mode = "runtime" if has_runtime_creds else ("env" if has_env_creds else "none")
+
+    if req_mode == "live" and credentials_mode == "none":
+        raise HTTPException(
+            status_code=400,
+            detail="Live mode requires API credentials. Provide api_key/api_secret or set env credentials.",
+        )
+
+    config = {
+        "name": req.name.strip(),
+        "exchange": req.exchange,
+        "exchange_account": req.exchange_account.strip() if isinstance(req.exchange_account, str) else None,
+        "tp_pct": float(req.tp_pct),
+        "sl_pct": float(req.sl_pct),
+        "poll_interval_seconds": int(req.poll_interval_seconds),
+        "execution_mode": req.execution_mode,
+        "credentials_mode": credentials_mode,
+        "total_capital_usdt": float(req.total_capital_usdt),
+        "rows": [row.model_dump() for row in req.rows],
+        "source_strategy_id": req.source_strategy_id,
+    }
+    record = live_robot_store.create_robot(config=config)
+    rid = str(record.get("robot_id", "")).strip()
+    live_robot_engine.register_credentials(
+        rid,
+        exchange=req.exchange,
+        api_key=req.api_key,
+        api_secret=req.api_secret,
+    )
+    live_robot_store.append_event(
+        rid,
+        level="info",
+        event_type="created",
+        message="Robot config created.",
+        data={
+            "exchange": req.exchange,
+            "mode": req.execution_mode,
+            "credentials_mode": credentials_mode,
+            "row_count": len(req.rows),
+        },
+    )
+    latest = live_robot_store.get_robot(rid, include_events=True) or record
+    return LiveRobotRecord(**latest)
+
+
+@app.get("/api/live/robots", response_model=LiveRobotListResponse)
+def list_live_robots() -> LiveRobotListResponse:
+    robots = [LiveRobotRecord(**item) for item in live_robot_store.list_robots()]
+    return LiveRobotListResponse(robots=robots)
+
+
+@app.get("/api/live/robots/{robot_id}", response_model=LiveRobotRecord)
+def get_live_robot(robot_id: str) -> LiveRobotRecord:
+    record = live_robot_store.get_robot(robot_id, include_events=True)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Live robot not found")
+    return LiveRobotRecord(**record)
+
+
+@app.post("/api/live/robots/{robot_id}/start", response_model=LiveRobotRecord)
+def start_live_robot(robot_id: str, req: LiveRobotStartRequest | None = None) -> LiveRobotRecord:
+    record_before_start = live_robot_store.get_robot(robot_id, include_events=False)
+    if record_before_start is not None and req is not None:
+        key = str(req.api_key or "").strip()
+        secret = str(req.api_secret or "").strip()
+        if key and secret:
+            cfg = record_before_start.get("config", {}) if isinstance(record_before_start, dict) else {}
+            exchange = str(cfg.get("exchange", "bybit")).lower().strip() or "bybit"
+            live_robot_engine.register_credentials(
+                robot_id,
+                exchange=exchange,
+                api_key=key,
+                api_secret=secret,
+            )
+    try:
+        record = live_robot_engine.start(robot_id)
+        return LiveRobotRecord(**record)
+    except ValueError as exc:
+        detail = str(exc)
+        if live_robot_store.get_robot(robot_id, include_events=False) is not None:
+            live_robot_store.update_state(
+                robot_id,
+                {
+                    "status": "error",
+                    "running": False,
+                    "trigger_reason": "start_failed",
+                    "last_error": detail,
+                },
+            )
+            live_robot_store.append_event(
+                robot_id,
+                level="error",
+                event_type="start_failed",
+                message=detail,
+                data={},
+            )
+            latest = live_robot_store.get_robot(robot_id, include_events=False)
+            if latest is not None:
+                mobile_notifier.notify_robot_event(
+                    latest,
+                    event_type="start_failed",
+                    level="error",
+                    message=detail,
+                    data={},
+                )
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/api/live/robots/{robot_id}/stop", response_model=LiveRobotRecord)
+def stop_live_robot(robot_id: str) -> LiveRobotRecord:
+    try:
+        record = live_robot_engine.stop(robot_id, reason="manual_stop")
+        return LiveRobotRecord(**record)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/api/live/robots/{robot_id}/close-all", response_model=LiveRobotRecord)
+def close_all_live_robot(robot_id: str) -> LiveRobotRecord:
+    try:
+        record = live_robot_engine.close_all(robot_id)
+        return LiveRobotRecord(**record)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.post("/api/live/robots/{robot_id}/status-check", response_model=LiveRobotRecord)
+def check_live_robot_status(robot_id: str, req: LiveRobotStartRequest | None = None) -> LiveRobotRecord:
+    record_before_check = live_robot_store.get_robot(robot_id, include_events=False)
+    if record_before_check is not None and req is not None:
+        key = str(req.api_key or "").strip()
+        secret = str(req.api_secret or "").strip()
+        if key and secret:
+            cfg = record_before_check.get("config", {}) if isinstance(record_before_check, dict) else {}
+            exchange = str(cfg.get("exchange", "bybit")).lower().strip() or "bybit"
+            live_robot_engine.register_credentials(
+                robot_id,
+                exchange=exchange,
+                api_key=key,
+                api_secret=secret,
+            )
+    try:
+        record = live_robot_engine.check_status(robot_id)
+        return LiveRobotRecord(**record)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.delete("/api/live/robots/{robot_id}", response_model=LiveRobotDeleteResponse)
+def delete_live_robot(robot_id: str) -> LiveRobotDeleteResponse:
+    try:
+        removed = live_robot_engine.delete(robot_id)
+        rid = str(removed.get("robot_id", "")).strip() or str(robot_id).strip()
+        return LiveRobotDeleteResponse(deleted=True, robot_id=rid)
+    except ValueError as exc:
+        detail = str(exc)
+        status = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status, detail=detail) from exc
+
+
+@app.get("/api/live/robots/{robot_id}/events", response_model=LiveRobotEventsResponse)
+def get_live_robot_events(robot_id: str, limit: int = 200) -> LiveRobotEventsResponse:
+    events = live_robot_store.get_events(robot_id, limit=limit)
+    if events is None:
+        raise HTTPException(status_code=404, detail="Live robot not found")
+    return LiveRobotEventsResponse(robot_id=robot_id, events=events)
 
 
 @app.get("/api/history/top", response_model=HistoryRunsResponse)
@@ -1505,6 +1899,8 @@ def run_custom_backtest(req: CustomBacktestRequest) -> BacktestResponse:
             portfolio=portfolio,
             params=params,
             initial_capital_usdt=req.initial_capital_usdt,
+            tp_pct=req.tp_pct,
+            sl_pct=req.sl_pct,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1522,6 +1918,8 @@ def run_custom_backtest(req: CustomBacktestRequest) -> BacktestResponse:
             "start_date": req.start_date.isoformat(),
             "end_date": req.end_date.isoformat(),
             "top_k": 1,
+            "tp_pct": req.tp_pct,
+            "sl_pct": req.sl_pct,
         },
     )
 
@@ -1587,6 +1985,8 @@ def run_refill_custom_backtest(req: RefillCustomBacktestRequest) -> BacktestResp
             portfolio=portfolio,
             params=params,
             initial_capital_usdt=req.initial_capital_usdt,
+            tp_pct=req.tp_pct,
+            sl_pct=req.sl_pct,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1604,6 +2004,8 @@ def run_refill_custom_backtest(req: RefillCustomBacktestRequest) -> BacktestResp
             "start_date": req.start_date.isoformat(),
             "end_date": req.end_date.isoformat(),
             "top_k": 1,
+            "tp_pct": req.tp_pct,
+            "sl_pct": req.sl_pct,
         },
     )
 

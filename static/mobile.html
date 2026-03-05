@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>机器人手机控制台</title>
+  <link rel="stylesheet" href="/static/mobile.css?v=20260305a" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <h1>机器人手机控制台</h1>
+      <p>导入电脑策略，快速创建并控制实盘/模拟机器人。</p>
+    </header>
+
+    <section class="card">
+      <h2>1) 从电脑导入策略</h2>
+      <div class="row">
+        <input id="transfer_code" type="text" placeholder="输入电脑导出码，例如 AB12CD34" />
+        <button id="import_strategy_btn">导入策略</button>
+        <button id="scan_strategy_btn" class="secondary" type="button">扫码导入</button>
+      </div>
+      <div id="import_status" class="status">等待导入。</div>
+      <div id="strategy_summary" class="summary"></div>
+    </section>
+
+    <section class="card">
+      <h2>2) 创建机器人</h2>
+      <div class="grid">
+        <label>机器人名称<input id="robot_name" type="text" value="mobile-robot" /></label>
+        <label>交易所
+          <select id="robot_exchange">
+            <option value="bybit" selected>Bybit</option>
+            <option value="binance">Binance</option>
+          </select>
+        </label>
+        <label>执行模式
+          <select id="robot_mode">
+            <option value="dry-run" selected>dry-run</option>
+            <option value="live">live（Bybit）</option>
+          </select>
+        </label>
+        <label>总资金(USDT)<input id="capital_usdt" type="number" value="10000" min="1" /></label>
+        <label>多头杠杆<input id="long_lev" type="number" value="1" min="1" max="20" step="0.1" /></label>
+        <label>空头杠杆<input id="short_lev" type="number" value="1" min="1" max="20" step="0.1" /></label>
+        <label>TP(%)<input id="tp_pct" type="number" value="8" min="0.01" step="0.01" /></label>
+        <label>SL(%)<input id="sl_pct" type="number" value="4" min="0.01" step="0.01" /></label>
+        <label>轮询秒数<input id="poll_sec" type="number" value="10" min="1" max="3600" /></label>
+        <label>API Key（可选）<input id="api_key" type="password" autocomplete="off" /></label>
+        <label>API Secret（可选）<input id="api_secret" type="password" autocomplete="off" /></label>
+      </div>
+      <div class="row">
+        <button id="create_robot_btn">按导入策略创建机器人</button>
+      </div>
+      <div id="create_status" class="status">未创建。</div>
+    </section>
+
+    <section class="card">
+      <h2>3) 机器人控制</h2>
+      <div class="row">
+        <button id="refresh_robots_btn" class="secondary">刷新列表</button>
+      </div>
+      <div id="robots_status" class="status">加载中...</div>
+      <div id="robots_list" class="robot-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>4) 事件日志</h2>
+      <div id="events_status" class="status">请选择机器人查看事件。</div>
+      <div id="events_list" class="events-list"></div>
+    </section>
+  </div>
+
+  <div id="scan_modal" class="scan-modal" style="display:none;">
+    <div class="scan-panel">
+      <h3>扫码导入策略</h3>
+      <video id="scan_video" autoplay playsinline muted></video>
+      <div id="scan_status" class="status">准备打开摄像头...</div>
+      <div class="row">
+        <button id="stop_scan_btn" class="secondary" type="button">停止扫码</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/mobile.js?v=20260305b"></script>
+</body>
+</html>
