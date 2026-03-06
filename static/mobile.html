@@ -53,6 +53,17 @@
         <button id="create_robot_btn">按导入策略创建机器人</button>
       </div>
       <div id="create_status" class="status">未创建。</div>
+      <hr />
+      <h3>2.1 无电脑模式：手动仓位创建</h3>
+      <p class="status">不依赖导入策略。直接粘贴仓位 JSON 创建机器人。</p>
+      <textarea id="manual_rows_json" rows="7" placeholder='[
+  {"asset":"BTCUSDT","direction":"long","weight_pct":50,"margin":5000,"notional":5000,"leverage":1},
+  {"asset":"ETHUSDT","direction":"short","weight_pct":50,"margin":5000,"notional":5000,"leverage":1}
+]'></textarea>
+      <div class="row">
+        <button id="create_robot_manual_btn" class="secondary">按手动仓位创建机器人</button>
+      </div>
+      <div id="manual_create_status" class="status">未创建。</div>
     </section>
 
     <section class="card">

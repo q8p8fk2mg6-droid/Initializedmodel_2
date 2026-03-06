@@ -76,6 +76,7 @@ label {
 
 input,
 select,
+textarea,
 button {
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -85,9 +86,17 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   background: #fff;
   color: var(--text);
+}
+
+textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  line-height: 1.4;
 }
 
 button {

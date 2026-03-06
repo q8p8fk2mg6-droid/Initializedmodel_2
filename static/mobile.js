@@ -280,21 +280,30 @@ async function buildPlanFromImportedStrategy() {
     total_capital_usdt: totalCapital,
     long_leverage: longLev,
     short_leverage: shortLev,
-    portfolio: importedStrategy.portfolio.map((leg) => ({
-      asset: String(leg.asset || "").toUpperCase(),
-      weight: asNum(leg.weight),
-      direction: String(leg.direction || "long").toLowerCase() === "short" ? "short" : "long",
-      leverage: leg.leverage == null ? null : asNum(leg.leverage),
-    })),
+    rows: [],
   };
-  const resp = await fetch("/api/calculator/plan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  payload.rows = importedStrategy.portfolio.map((leg) => {
+    const direction = String(leg.direction || "long").toLowerCase() === "short" ? "short" : "long";
+    const weight = Math.max(asNum(leg.weight, 0), 0);
+    const leverageRaw = leg.leverage == null ? null : asNum(leg.leverage, 0);
+    const leverage =
+      leverageRaw && leverageRaw > 0
+        ? leverageRaw
+        : direction === "long"
+        ? Math.max(longLev, 1)
+        : Math.max(shortLev, 1);
+    const margin = totalCapital * weight;
+    const notional = margin * leverage;
+    return {
+      asset: String(leg.asset || "").toUpperCase(),
+      direction,
+      weight_pct: weight * 100,
+      margin,
+      notional,
+      leverage,
+    };
   });
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(parseApiError(data, "根据策略计算仓位失败"));
-  return data;
+  return payload;
 }
 
 function collectRobotRequestFromPlan(plan) {
@@ -353,6 +362,105 @@ async function createRobotFromImported() {
     if (rid) await loadRobotEvents(rid);
   } catch (err) {
     setText("create_status", err.message || "创建机器人失败");
+  }
+}
+
+function parseManualRowsJson() {
+  const raw = String(document.getElementById("manual_rows_json")?.value || "").trim();
+  if (!raw) throw new Error("请填写手动仓位 JSON。");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`手动仓位 JSON 解析失败：${err.message || "invalid json"}`);
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("手动仓位必须是非空数组。");
+  }
+
+  const rows = parsed.map((row, idx) => {
+    const asset = String(row?.asset || "").toUpperCase().trim();
+    const direction = String(row?.direction || "long").toLowerCase().trim();
+    const weightPct = asNum(row?.weight_pct, -1);
+    const margin = asNum(row?.margin, -1);
+    const notional = asNum(row?.notional, -1);
+    const leverage = asNum(row?.leverage, -1);
+    if (!asset) throw new Error(`第 ${idx + 1} 行 asset 不能为空。`);
+    if (!["long", "short"].includes(direction)) throw new Error(`第 ${idx + 1} 行 direction 只能是 long/short。`);
+    if (!(weightPct > 0)) throw new Error(`第 ${idx + 1} 行 weight_pct 必须 > 0。`);
+    if (!(margin > 0)) throw new Error(`第 ${idx + 1} 行 margin 必须 > 0。`);
+    if (!(notional > 0)) throw new Error(`第 ${idx + 1} 行 notional 必须 > 0。`);
+    if (!(leverage >= 1)) throw new Error(`第 ${idx + 1} 行 leverage 必须 >= 1。`);
+    return {
+      asset,
+      direction,
+      weight_pct: weightPct,
+      margin,
+      notional,
+      leverage,
+    };
+  });
+  return rows;
+}
+
+function collectRobotRequestFromManualRows(rows) {
+  const name = String(document.getElementById("robot_name")?.value || "").trim() || "mobile-robot";
+  const exchange = String(document.getElementById("robot_exchange")?.value || "bybit").toLowerCase();
+  const mode = String(document.getElementById("robot_mode")?.value || "dry-run").toLowerCase();
+  const tpPct = asNum(document.getElementById("tp_pct")?.value, 0);
+  const slPct = asNum(document.getElementById("sl_pct")?.value, 0);
+  const pollSec = Math.trunc(asNum(document.getElementById("poll_sec")?.value, 10));
+  const totalCapital = asNum(document.getElementById("capital_usdt")?.value, 0);
+  if (!(tpPct > 0)) throw new Error("TP(%) 必须大于 0。");
+  if (!(slPct > 0)) throw new Error("SL(%) 必须大于 0。");
+  if (!(pollSec >= 1)) throw new Error("轮询秒数必须 >= 1。");
+  if (!(totalCapital > 0)) throw new Error("总资金必须 > 0。");
+
+  const creds = collectRuntimeCreds();
+  return {
+    name,
+    exchange,
+    execution_mode: mode,
+    tp_pct: tpPct,
+    sl_pct: slPct,
+    poll_interval_seconds: pollSec,
+    total_capital_usdt: totalCapital,
+    rows: rows.map((row) => ({
+      asset: String(row.asset || "").toUpperCase(),
+      direction: String(row.direction || "long").toLowerCase(),
+      weight_pct: asNum(row.weight_pct),
+      margin: asNum(row.margin),
+      notional: asNum(row.notional),
+      leverage: asNum(row.leverage, 1),
+    })),
+    source_strategy_id: null,
+    api_key: creds.api_key,
+    api_secret: creds.api_secret,
+  };
+}
+
+async function createRobotFromManualRows() {
+  try {
+    setText("manual_create_status", "正在创建机器人...");
+    const rows = parseManualRowsJson();
+    const req = collectRobotRequestFromManualRows(rows);
+    const resp = await fetch("/api/live/robots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(parseApiError(payload, "手动创建机器人失败"));
+    const rid = String(payload.robot_id || "");
+    setText(
+      "manual_create_status",
+      `手动创建成功：${rid} | rows=${(req.rows || []).length} | 资金=${fmtUsd(req.total_capital_usdt)}`
+    );
+    selectedRobotId = rid;
+    await loadRobots({ quiet: true });
+    if (rid) await loadRobotEvents(rid);
+  } catch (err) {
+    setText("manual_create_status", err.message || "手动创建机器人失败");
   }
 }
 
@@ -576,6 +684,13 @@ const createBtn = document.getElementById("create_robot_btn");
 if (createBtn) {
   createBtn.addEventListener("click", () => {
     createRobotFromImported().catch(() => {});
+  });
+}
+
+const createManualBtn = document.getElementById("create_robot_manual_btn");
+if (createManualBtn) {
+  createManualBtn.addEventListener("click", () => {
+    createRobotFromManualRows().catch(() => {});
   });
 }
 

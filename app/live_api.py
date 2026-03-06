@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hmac
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.clients.exchange_adapter import ExchangeAdapterRegistry
 from app.config import settings
@@ -76,6 +79,9 @@ if settings.live_api_require_auth and not str(settings.live_api_auth_token or ""
     raise RuntimeError("LIVE_API_REQUIRE_AUTH=true but LIVE_API_AUTH_TOKEN is empty.")
 
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = ROOT_DIR / "static"
+
 app = FastAPI(title="Carry Optimizer Live API")
 app.add_middleware(
     CORSMiddleware,
@@ -83,6 +89,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Live-Token", "X-API-Token"],
 )
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 live_robot_store = LiveRobotStore(
     file_path=settings.live_robot_store_path,
@@ -116,6 +123,30 @@ live_robot_engine = LiveRobotEngine(
 )
 
 router = APIRouter(prefix="/api/live", dependencies=[Depends(require_token_auth)])
+
+
+@app.get("/")
+def home() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "mobile.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/mobile")
+def mobile_home() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "mobile.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/healthz")
