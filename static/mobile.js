@@ -7,6 +7,117 @@ let scanTimer = null;
 let scanBusy = false;
 let scanActive = false;
 let scanDetector = null;
+const API_TOKEN_STORAGE_KEY = "live_api_bearer_token";
+let runtimeApiToken = "";
+
+function normalizeApiToken(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+}
+
+function setTokenStatus(msg) {
+  setText("token_status", msg);
+}
+
+function getApiToken() {
+  const inputEl = document.getElementById("api_token");
+  if (inputEl) {
+    runtimeApiToken = normalizeApiToken(inputEl.value);
+  }
+  return runtimeApiToken;
+}
+
+function updateTokenStatus(extraMsg = "") {
+  const token = getApiToken();
+  if (!token) {
+    setTokenStatus("未设置 Token。所有 API 请求会自动附带 Authorization: Bearer。");
+    return;
+  }
+  const tail = extraMsg ? `，${extraMsg}` : "";
+  setTokenStatus(`Token 已设置（${token.length} 字符）${tail}。`);
+}
+
+function saveApiTokenToLocal() {
+  const token = getApiToken();
+  try {
+    if (token) {
+      window.localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+      updateTokenStatus("已保存到本机");
+    } else {
+      window.localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+      setTokenStatus("Token 为空，已移除本地保存。");
+    }
+  } catch (_) {
+    updateTokenStatus("浏览器不支持本地存储，仅本次生效");
+  }
+}
+
+function clearApiToken() {
+  runtimeApiToken = "";
+  const inputEl = document.getElementById("api_token");
+  if (inputEl) inputEl.value = "";
+  try {
+    window.localStorage.removeItem(API_TOKEN_STORAGE_KEY);
+  } catch (_) {
+    // Ignore localStorage failures.
+  }
+  setTokenStatus("Token 已清空。");
+}
+
+function loadApiToken() {
+  let token = "";
+  let tokenFromQuery = false;
+
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    token = normalizeApiToken(params.get("token"));
+    tokenFromQuery = Boolean(token);
+  } catch (_) {
+    token = "";
+  }
+
+  if (!token) {
+    try {
+      token = normalizeApiToken(window.localStorage.getItem(API_TOKEN_STORAGE_KEY));
+    } catch (_) {
+      token = "";
+    }
+  }
+
+  runtimeApiToken = token;
+  const inputEl = document.getElementById("api_token");
+  if (inputEl) inputEl.value = token;
+
+  if (tokenFromQuery) {
+    try {
+      window.localStorage.setItem(API_TOKEN_STORAGE_KEY, token);
+    } catch (_) {
+      // Ignore localStorage failures.
+    }
+  }
+
+  updateTokenStatus(tokenFromQuery ? "来自 URL 并已写入本地" : "");
+}
+
+function buildApiHeaders(rawHeaders) {
+  const headers = new Headers(rawHeaders || {});
+  const token = getApiToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  return headers;
+}
+
+async function apiFetch(url, init = {}) {
+  const req = { ...init, headers: buildApiHeaders(init.headers) };
+  const resp = await fetch(url, req);
+  if (resp.status === 401) {
+    setTokenStatus("鉴权失败（401），请检查 Token。");
+  }
+  return resp;
+}
 
 function parseApiError(payload, fallback) {
   if (!payload) return fallback;
@@ -245,7 +356,7 @@ async function importStrategyByCode(options = {}) {
     return;
   }
   try {
-    const resp = await fetch("/api/strategy-transfer/import", {
+    const resp = await apiFetch("/api/strategy-transfer/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -345,7 +456,7 @@ async function createRobotFromImported() {
     setText("create_status", "正在计算仓位并创建机器人...");
     const plan = await buildPlanFromImportedStrategy();
     const req = collectRobotRequestFromPlan(plan);
-    const resp = await fetch("/api/live/robots", {
+    const resp = await apiFetch("/api/live/robots", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
@@ -444,7 +555,7 @@ async function createRobotFromManualRows() {
     setText("manual_create_status", "正在创建机器人...");
     const rows = parseManualRowsJson();
     const req = collectRobotRequestFromManualRows(rows);
-    const resp = await fetch("/api/live/robots", {
+    const resp = await apiFetch("/api/live/robots", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
@@ -535,7 +646,7 @@ function renderRobots(robots) {
 async function loadRobots(options = {}) {
   const quiet = Boolean(options && options.quiet);
   try {
-    const resp = await fetch("/api/live/robots", { cache: "no-store" });
+    const resp = await apiFetch("/api/live/robots", { cache: "no-store" });
     const payload = await resp.json();
     if (!resp.ok) throw new Error(parseApiError(payload, "加载机器人列表失败"));
     const robots = payload.robots || [];
@@ -582,7 +693,7 @@ async function robotAction(robotId, action) {
       init.headers = { "Content-Type": "application/json" };
       init.body = JSON.stringify(collectRuntimeCreds());
     }
-    const resp = await fetch(info.url, init);
+    const resp = await apiFetch(info.url, init);
     const payload = await resp.json();
     if (!resp.ok) throw new Error(parseApiError(payload, `${info.label}失败`));
 
@@ -626,7 +737,7 @@ async function loadRobotEvents(robotId, limit = 80) {
     return;
   }
   try {
-    const resp = await fetch(`/api/live/robots/${encodeURIComponent(rid)}/events?limit=${encodeURIComponent(limit)}`);
+    const resp = await apiFetch(`/api/live/robots/${encodeURIComponent(rid)}/events?limit=${encodeURIComponent(limit)}`);
     const payload = await resp.json();
     if (!resp.ok) throw new Error(parseApiError(payload, "加载事件失败"));
     const events = payload.events || [];
@@ -648,6 +759,33 @@ function initFromQueryCode() {
   } catch (_) {
     // Ignore query parsing errors.
   }
+}
+
+const apiTokenInput = document.getElementById("api_token");
+if (apiTokenInput) {
+  apiTokenInput.addEventListener("input", () => {
+    updateTokenStatus();
+  });
+  apiTokenInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveApiTokenToLocal();
+    }
+  });
+}
+
+const saveTokenBtn = document.getElementById("save_token_btn");
+if (saveTokenBtn) {
+  saveTokenBtn.addEventListener("click", () => {
+    saveApiTokenToLocal();
+  });
+}
+
+const clearTokenBtn = document.getElementById("clear_token_btn");
+if (clearTokenBtn) {
+  clearTokenBtn.addEventListener("click", () => {
+    clearApiToken();
+  });
 }
 
 const importBtn = document.getElementById("import_strategy_btn");
@@ -701,6 +839,7 @@ if (refreshBtn) {
   });
 }
 
+loadApiToken();
 initFromQueryCode();
 loadRobots({ quiet: true }).catch(() => {});
 setInterval(() => {

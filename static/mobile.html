@@ -14,6 +14,16 @@
     </header>
 
     <section class="card">
+      <h2>0) Token 鉴权</h2>
+      <div class="row">
+        <input id="api_token" type="password" placeholder="输入 LIVE_API_AUTH_TOKEN（自动 Bearer）" autocomplete="off" />
+        <button id="save_token_btn" class="secondary" type="button">保存 Token</button>
+        <button id="clear_token_btn" class="secondary" type="button">清空</button>
+      </div>
+      <div id="token_status" class="status">未设置 Token。所有 API 请求会自动附带 Authorization: Bearer。</div>
+    </section>
+
+    <section class="card">
       <h2>1) 从电脑导入策略</h2>
       <div class="row">
         <input id="transfer_code" type="text" placeholder="输入电脑导出码，例如 AB12CD34" />
@@ -93,6 +103,6 @@
     </div>
   </div>
 
-  <script src="/static/mobile.js?v=20260305b"></script>
+  <script src="/static/mobile.js?v=20260306a"></script>
 </body>
 </html>
