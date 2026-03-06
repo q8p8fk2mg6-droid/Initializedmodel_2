@@ -21,6 +21,7 @@ let liveRobotsById = {};
 let selectedLiveRobotId = "";
 
 const progressTimers = {};
+const MOBILE_STRATEGY_QR_PREFIX = "CARRY1:";
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
@@ -111,31 +112,81 @@ function showMobileTransferStatus(msg) {
   setText("mobile_transfer_status", msg);
 }
 
-function renderMobileTransferQr(importUrl, code) {
+function encodeBase64UrlUtf8(text) {
+  const src = String(text || "");
+  const bytes = new TextEncoder().encode(src);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function buildPortableMobileStrategy(strategy, strategyId) {
+  const s = strategy && typeof strategy === "object" ? strategy : null;
+  if (!s) throw new Error("导出失败：策略对象不存在。");
+  const sid = String(strategyId || s.strategy_id || "").trim();
+  if (!sid) throw new Error("导出失败：策略ID为空。");
+  const portfolio = Array.isArray(s.portfolio) ? s.portfolio : [];
+  if (portfolio.length === 0) throw new Error("导出失败：策略持仓为空。");
+  const params = s.params && typeof s.params === "object" ? s.params : {};
+  return {
+    schema: "carry.strategy.v1",
+    exported_at: new Date().toISOString(),
+    strategy: {
+      strategy_id: sid,
+      source: "desktop-inline-qr",
+      annualized_return: Number(s.annualized_return ?? 0),
+      sharpe: Number(s.sharpe ?? 0),
+      max_drawdown: Number(s.max_drawdown ?? 0),
+      params: {
+        rehedge_hours: Number(params.rehedge_hours ?? 0),
+        rebalance_threshold_pct: Number(params.rebalance_threshold_pct ?? 0),
+        long_leverage: Number(params.long_leverage ?? 1),
+        short_leverage: Number(params.short_leverage ?? 1),
+      },
+      portfolio: portfolio.map((leg) => ({
+        asset: String(leg?.asset || "").toUpperCase(),
+        direction: String(leg?.direction || "long").toLowerCase() === "short" ? "short" : "long",
+        weight: Number(leg?.weight ?? 0),
+        leverage: leg?.leverage == null ? null : Number(leg.leverage),
+      })),
+    },
+  };
+}
+
+function buildPortableMobileStrategyQrText(strategy, strategyId) {
+  const payload = buildPortableMobileStrategy(strategy, strategyId);
+  const encoded = encodeBase64UrlUtf8(JSON.stringify(payload));
+  return `${MOBILE_STRATEGY_QR_PREFIX}${encoded}`;
+}
+
+function renderMobileTransferQr(qrText, captionText = "") {
   const wrap = document.getElementById("mobile_transfer_qr_wrap");
   const canvas = document.getElementById("mobile_transfer_qr_canvas");
   const caption = document.getElementById("mobile_transfer_qr_caption");
   if (!wrap || !canvas || !caption) return;
 
-  const url = String(importUrl || "").trim();
-  const transferCode = String(code || "").trim().toUpperCase();
-  if (!url || !transferCode) {
+  const text = String(qrText || "").trim();
+  const finalCaption = String(captionText || "").trim();
+  if (!text) {
     wrap.style.display = "none";
     caption.innerText = "";
     return;
   }
 
   wrap.style.display = "flex";
-  caption.innerText = `扫码后会自动填入导入码。code=${transferCode}`;
+  caption.innerText = finalCaption || "扫码后会自动导入策略数据（不依赖 transfer API）。";
 
   if (!(window.QRCode && typeof window.QRCode.toCanvas === "function")) {
-    caption.innerText = `二维码库加载失败，请手动输入导入码：${transferCode}`;
+    caption.innerText = `${finalCaption || "二维码库加载失败"}。请手动粘贴导入串。`;
     return;
   }
 
   window.QRCode.toCanvas(
     canvas,
-    url,
+    text,
     {
       width: 180,
       margin: 1,
@@ -143,7 +194,7 @@ function renderMobileTransferQr(importUrl, code) {
     },
     (err) => {
       if (err) {
-        caption.innerText = `二维码生成失败，请手动输入导入码：${transferCode}`;
+        caption.innerText = `${finalCaption || "二维码生成失败"}。请手动粘贴导入串。`;
       }
     }
   );
@@ -751,33 +802,27 @@ async function exportStrategyForMobile(strategyId) {
     return;
   }
   try {
-    const resp = await fetch("/api/strategy-transfer/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        strategy_id: sid,
-        source: "auto",
-        expires_minutes: 60,
-      }),
-    });
-    const payload = await resp.json();
-    if (!resp.ok) throw new Error(parseApiError(payload, "导出到手机失败"));
-    const code = String(payload.transfer_code || "").trim().toUpperCase();
-    const importUrl = String(payload.import_url || "").trim();
-    if (!code) throw new Error("导出到手机失败：未返回导入码。");
+    const strategy = strategiesById[sid];
+    if (!strategy) throw new Error("导出失败：策略不存在，请先重新运行回测。");
+    const qrText = buildPortableMobileStrategyQrText(strategy, sid);
 
+    let copied = false;
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
-        await navigator.clipboard.writeText(code);
+        await navigator.clipboard.writeText(qrText);
+        copied = true;
       } catch (_) {
         // Ignore clipboard failures and continue with manual copy.
       }
     }
-    renderMobileTransferQr(importUrl, code);
+    renderMobileTransferQr(qrText, `扫码后自动导入策略。strategy_id=${sid}`);
     showMobileTransferStatus(
-      `已导出策略 ${sid}。导入码：${code}（60分钟有效，已复制到剪贴板）。手机打开 ${importUrl}。`
+      `已导出策略 ${sid}。请在手机 /mobile 页面点击“扫码导入”。` +
+      (copied ? " 导入串已复制到剪贴板（可手动粘贴）。" : " 若无法扫码，可手动复制导入串粘贴。")
     );
-    window.prompt("复制导入码并在手机 /mobile 页面导入：", code);
+    if (!copied) {
+      window.prompt("复制导入串并在手机 /mobile 页面导入：", qrText);
+    }
   } catch (err) {
     showMobileTransferStatus(err.message || "导出到手机失败");
   }

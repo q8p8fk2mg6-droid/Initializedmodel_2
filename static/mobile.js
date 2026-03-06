@@ -8,6 +8,8 @@ let scanBusy = false;
 let scanActive = false;
 let scanDetector = null;
 const API_TOKEN_STORAGE_KEY = "live_api_bearer_token";
+const MOBILE_STRATEGY_QR_PREFIX = "CARRY1:";
+const MOBILE_STRATEGY_SCHEMA = "carry.strategy.v1";
 let runtimeApiToken = "";
 
 function normalizeApiToken(raw) {
@@ -117,6 +119,118 @@ async function apiFetch(url, init = {}) {
     setTokenStatus("鉴权失败（401），请检查 Token。");
   }
   return resp;
+}
+
+function decodeBase64UrlUtf8(raw) {
+  const normalized = String(raw || "")
+    .trim()
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  if (!normalized) throw new Error("empty base64url");
+  const padLen = (4 - (normalized.length % 4)) % 4;
+  const padded = normalized + "=".repeat(padLen);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function sanitizePortableStrategy(raw) {
+  const src = raw && typeof raw === "object" ? raw : null;
+  if (!src) throw new Error("invalid strategy payload");
+  const portfolioRaw = Array.isArray(src.portfolio) ? src.portfolio : [];
+  const portfolio = portfolioRaw
+    .map((leg) => {
+      const asset = String(leg?.asset || "").toUpperCase().trim();
+      if (!asset) return null;
+      const direction = String(leg?.direction || "long").toLowerCase() === "short" ? "short" : "long";
+      const weight = asNum(leg?.weight, 0);
+      if (!(weight > 0)) return null;
+      const leverageRaw = leg?.leverage;
+      const leverage = leverageRaw == null ? null : asNum(leverageRaw, 0);
+      return {
+        asset,
+        direction,
+        weight,
+        leverage: leverage && leverage > 0 ? leverage : null,
+      };
+    })
+    .filter(Boolean);
+  if (!portfolio.length) {
+    throw new Error("strategy payload has no valid portfolio");
+  }
+
+  const paramsRaw = src.params && typeof src.params === "object" ? src.params : {};
+  return {
+    strategy_id: String(src.strategy_id || "qr-inline").trim() || "qr-inline",
+    source: String(src.source || "qr-inline").trim() || "qr-inline",
+    annualized_return: asNum(src.annualized_return, 0),
+    sharpe: asNum(src.sharpe, 0),
+    max_drawdown: asNum(src.max_drawdown, 0),
+    params: {
+      rehedge_hours: asNum(paramsRaw.rehedge_hours, 0),
+      rebalance_threshold_pct: asNum(paramsRaw.rebalance_threshold_pct, 0),
+      long_leverage: asNum(paramsRaw.long_leverage, 1),
+      short_leverage: asNum(paramsRaw.short_leverage, 1),
+    },
+    portfolio,
+  };
+}
+
+function tryParsePortableStrategyFromText(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return null;
+
+  let encoded = "";
+  if (text.toUpperCase().startsWith(MOBILE_STRATEGY_QR_PREFIX)) {
+    encoded = text.slice(MOBILE_STRATEGY_QR_PREFIX.length).trim();
+  }
+
+  if (!encoded) {
+    try {
+      const url = new URL(text);
+      encoded = String(url.searchParams.get("payload") || url.searchParams.get("strategy_payload") || "").trim();
+    } catch (_) {
+      // Not URL, continue.
+    }
+  }
+
+  if (!encoded) {
+    const match = text.match(/CARRY1:([A-Za-z0-9\-_]+)/i);
+    if (match && match[1]) encoded = match[1].trim();
+  }
+
+  if (!encoded && /^[A-Za-z0-9\-_]{80,}$/.test(text)) {
+    encoded = text;
+  }
+  if (!encoded) return null;
+
+  try {
+    const decoded = decodeBase64UrlUtf8(encoded);
+    const payload = JSON.parse(decoded);
+    if (!payload || typeof payload !== "object") return null;
+
+    const schema = String(payload.schema || "").trim();
+    if (schema && schema !== MOBILE_STRATEGY_SCHEMA) {
+      return null;
+    }
+    const strategyRaw = payload.strategy && typeof payload.strategy === "object" ? payload.strategy : payload;
+    const strategy = sanitizePortableStrategy(strategyRaw);
+    return {
+      strategy,
+      importedCode: `QR:${String(strategy.strategy_id || "inline").slice(0, 24)}`,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function applyImportedStrategy(strategy, code = "") {
+  importedStrategy = strategy || null;
+  importedCode = String(code || "").trim() || String(strategy?.strategy_id || "INLINE");
+  renderImportedStrategy();
 }
 
 function parseApiError(payload, fallback) {
@@ -233,6 +347,14 @@ async function stopScanImport() {
 }
 
 async function handleScanPayload(rawText) {
+  const inline = tryParsePortableStrategyFromText(rawText);
+  if (inline) {
+    await stopScanImport();
+    applyImportedStrategy(inline.strategy, inline.importedCode);
+    setText("import_status", `扫码成功：已离线导入策略 ${inline.strategy.strategy_id}。`);
+    return true;
+  }
+
   const code = extractTransferCodeFromScan(rawText);
   if (!code) return false;
   const input = document.getElementById("transfer_code");
@@ -246,7 +368,7 @@ async function handleScanPayload(rawText) {
 async function startScanImport() {
   if (scanActive) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setText("import_status", "当前浏览器不支持摄像头扫码，请手动输入导入码。");
+    setText("import_status", "当前浏览器不支持摄像头扫码，请手动输入导入码或导入串。");
     return;
   }
 
@@ -271,7 +393,7 @@ async function startScanImport() {
   }
 
   if (!("BarcodeDetector" in window)) {
-    setScanStatus("浏览器不支持 BarcodeDetector，请手动输入导入码。");
+    setScanStatus("浏览器不支持 BarcodeDetector，请手动输入导入码或导入串。");
     return;
   }
 
@@ -350,11 +472,25 @@ function renderImportedStrategy() {
 
 async function importStrategyByCode(options = {}) {
   const consume = Boolean(options.consume);
-  const code = String(document.getElementById("transfer_code")?.value || "").trim().toUpperCase();
-  if (!code) {
-    setText("import_status", "请输入导入码。");
+  const inputRaw = String(document.getElementById("transfer_code")?.value || "").trim();
+  if (!inputRaw) {
+    setText("import_status", "请输入导入码或导入串。");
     return;
   }
+
+  const inline = tryParsePortableStrategyFromText(inputRaw);
+  if (inline) {
+    applyImportedStrategy(inline.strategy, inline.importedCode);
+    setText("import_status", `导入成功：已离线导入策略 ${inline.strategy.strategy_id}。`);
+    return;
+  }
+
+  const code = normalizeTransferCode(inputRaw);
+  if (!code) {
+    setText("import_status", "导入格式无效，请输入导入码或 CARRY1 导入串。");
+    return;
+  }
+
   try {
     const resp = await apiFetch("/api/strategy-transfer/import", {
       method: "POST",
@@ -364,11 +500,12 @@ async function importStrategyByCode(options = {}) {
         consume,
       }),
     });
+    if (resp.status === 404) {
+      throw new Error("当前服务未启用导入码接口，请使用扫码导入策略数据（CARRY1）或手动仓位 JSON。");
+    }
     const payload = await resp.json();
     if (!resp.ok) throw new Error(parseApiError(payload, "导入策略失败"));
-    importedCode = String(payload.transfer_code || code).toUpperCase();
-    importedStrategy = payload.strategy || null;
-    renderImportedStrategy();
+    applyImportedStrategy(payload.strategy || null, String(payload.transfer_code || code).toUpperCase());
     setText("import_status", `导入成功：${importedCode}，有效期至 ${fmtTime(payload.expires_at)}。`);
   } catch (err) {
     importedStrategy = null;
@@ -750,6 +887,13 @@ async function loadRobotEvents(robotId, limit = 80) {
 
 function initFromQueryCode() {
   try {
+    const inline = tryParsePortableStrategyFromText(window.location.href || "");
+    if (inline) {
+      applyImportedStrategy(inline.strategy, inline.importedCode);
+      setText("import_status", `已从 URL 自动导入策略 ${inline.strategy.strategy_id}。`);
+      return;
+    }
+
     const params = new URLSearchParams(window.location.search || "");
     const code = String(params.get("code") || "").trim().toUpperCase();
     if (!code) return;
